@@ -73,6 +73,11 @@ rem The 3D world at half width and height (960x540), upscaled to 1080p by FSR as
 rem steady 22-24 fps in the prologue's cell against about 19.5. VICTORY_QUALITY=1 keeps the 2/3.
 if not defined VICTORY_QUALITY if not defined VICTORY_RENDER_SCALE set "VICTORY_RENDER_SCALE=0.5"
 
+rem 60 frames a second where the game can (menus, videos; from scarlet-fps). 33.333: its own 30.
+if not defined VICTORY_FRAME_INTERVAL_MS set "VICTORY_FRAME_INTERVAL_MS=16.667"
+rem The DirectX 12 Agility SDK is used when D3D12\D3D12Core.dll (Microsoft.Direct3D.D3D12 1.620.2)
+rem is beside victory.exe; Windows' own Direct3D 12 otherwise (needed on Windows 10).
+
 rem Series S upscaling through AMD's PC FSR DLL (from a PC game you own; not included).
 if not defined VICTORY_FSR_DLL if exist "%root%\fsr\amd_fidelityfx_upscaler_dx12.dll" set "VICTORY_FSR_DLL=%root%\fsr\amd_fidelityfx_upscaler_dx12.dll"
 if not defined VICTORY_FSR_DLL echo WARNING: no FSR DLL (VICTORY_FSR_DLL or fsr\amd_fidelityfx_upscaler_dx12.dll): on NVIDIA the picture may stay black. 1>&2

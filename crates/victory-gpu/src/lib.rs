@@ -16,6 +16,9 @@
 //! `present` (swap chain).
 
 #[cfg(windows)]
+/// The DirectX 12 Agility SDK beside the executable, if there (`agility::load`).
+#[cfg(windows)]
+pub mod agility;
 mod ambient;
 #[cfg(all(windows, feature = "diagnostics"))]
 mod capture;
@@ -44,6 +47,8 @@ mod host;
 mod indirect;
 #[cfg(windows)]
 mod inplace;
+#[cfg(windows)]
+mod port;
 #[cfg(windows)]
 mod land;
 pub mod list;
@@ -79,7 +84,8 @@ mod shadow;
 mod tiles;
 pub mod signature;
 mod switch;
-#[cfg(all(windows, feature = "diagnostics"))]
+// (In release builds too: same-scene A/B of runtime switches, `VICTORY_AB`.)
+#[cfg(windows)]
 mod ab;
 #[cfg(windows)]
 mod tdr;

@@ -1,4 +1,4 @@
-# cool_fox for 8 GB NVIDIA cards
+# VIctoryUnified (cool_fox for 8 GB NVIDIA cards)
 
 A fork of **cool_fox** (codec_d's fork of [VIctory](https://github.com/Marvisak/VIctory), a
 compatibility layer that runs an Xbox Series title on Windows from files the user supplies),
@@ -8,6 +8,16 @@ every 64-lane GPU program translated exactly, and settings measured on an RTX 40
 **This repository contains no game files, code, assets, keys or download links.** You need
 your own complete, lawfully obtained copy of the game. Not affiliated with or endorsed by the
 game's developer or publisher.
+
+## VIctoryUnified v1.1
+
+- 60 frames a second in menus and videos (`VICTORY_FRAME_INTERVAL_MS=16.667`, from scarlet-fps).
+- The DirectX 12 Agility SDK loaded at run time when it is beside the executable (`D3D12/`),
+  Windows' own runtime otherwise: Windows 10 works (`crates/victory-gpu/src/agility.rs`).
+- Optional DLSS upscaling through OptiScaler in the Windows release (`START-DLSS.bat`); FSR stays the
+  default. The window title shows the real frame rate, and with frame generation its factor.
+- A cheaper per-submission look at the copies kept on the card, and several ports from other forks,
+  all off by default until measured: see PROGRESS.md (2026-11-27) and THIRD_PARTY.md.
 
 ## Where it stands
 

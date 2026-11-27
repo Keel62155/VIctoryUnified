@@ -68,6 +68,7 @@ fn build() -> [u8; 32] {
             "VICTORY_WAVE_OWN_BITS",
             "VICTORY_WAVE_LOCAL",
             "VICTORY_WAVE64_PAIRED",
+            "VICTORY_THREAD_TICKET",
             "VICTORY_PAIRED_EXCLUDE",
             "VICTORY_BVH_MISS",
             "VICTORY_F16_NEAREST",

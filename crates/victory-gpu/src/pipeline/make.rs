@@ -59,7 +59,30 @@ fn named(shaders: &[Arc<Shader>], name: &[u8]) -> bool {
         .any(|s| s.stage == "compute" && s.container.windows(name.len()).any(|w| w == name))
 }
 
+/// `VICTORY_MEASURE_LEAVE_OUT=<hash>,...`: FOR MEASURING ONLY. Pipelines of these shader
+/// hashes are not made and their draws and dispatches are dropped, so that what a pass costs
+/// can be read from the frame time with and without it. The passes are required: nothing
+/// leaves them out by default, and no launcher sets this.
+fn measure_leave_out() -> &'static [String] {
+    static HASHES: OnceLock<Vec<String>> = OnceLock::new();
+    HASHES.get_or_init(|| {
+        let all: Vec<String> = std::env::var("VICTORY_MEASURE_LEAVE_OUT")
+            .unwrap_or_default()
+            .split(',')
+            .map(|h| h.trim().to_ascii_lowercase())
+            .filter(|h| h.len() == 16 && h.bytes().all(|b| b.is_ascii_hexdigit()))
+            .collect();
+        if !all.is_empty() {
+            tracing::warn!(?all, "VICTORY_MEASURE_LEAVE_OUT: required passes left out, for measuring only");
+        }
+        all
+    })
+}
+
 fn left_out(shaders: &[Arc<Shader>]) -> Option<&'static str> {
+    if !measure_leave_out().is_empty() && shaders.iter().any(|s| measure_leave_out().contains(&s.hash)) {
+        return Some("named in VICTORY_MEASURE_LEAVE_OUT (measuring only), left out");
+    }
     static SKIP_RT_RESOLVE: OnceLock<bool> = OnceLock::new();
     let skip_rt = *SKIP_RT_RESOLVE.get_or_init(|| {
         let builder = std::env::var_os("VICTORY_BVH_BUILDER").is_some_and(|v| v == "1");

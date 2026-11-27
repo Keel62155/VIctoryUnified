@@ -242,6 +242,19 @@ thread_local! {
     static FOUND: std::cell::RefCell<Vec<usize>> = const { std::cell::RefCell::new(Vec::new()) };
 }
 
+/// Since the last frame line, all threads: kernel askings, the bytes of the
+/// ranges they walked, their nanoseconds, the 4 KiB pages they found
+/// written, the askings refused. An asking costs about 1.5-2 microseconds a
+/// MB of range with the title's threads running (174 MB: 380), and 6.5 if
+/// it resets a page at all (a 64 KiB range; 0.4 if not): the range is what
+/// it costs, more than the pages (cf-bench `ww` measure, 2026-11-27).
+static KERNEL: [std::sync::atomic::AtomicU64; 5] = [const { std::sync::atomic::AtomicU64::new(0) }; 5];
+
+/// [`KERNEL`], taken.
+pub(crate) fn kernel_asks() -> [u64; 5] {
+    std::array::from_fn(|i| KERNEL[i].swap(0, std::sync::atomic::Ordering::Relaxed))
+}
+
 /// The pages of `[first, last)` the kernel says were written since it was
 /// last asked, in order, each once, with their written parts; `None` if the range is not write-watched
 /// memory of one reservation. The caller holds the range ([`Asking`]).
@@ -255,8 +268,9 @@ fn kernel_written(first: usize, last: usize) -> Option<Vec<(usize, u16)>> {
             found.resize(count, 0);
         }
         let mut granularity = 0;
+        let began = std::time::Instant::now();
         #[cfg(feature = "diagnostics")]
-        let started = std::time::Instant::now();
+        let started = began;
         // SAFETY: the answer buffer holds `count` entries.
         let failed = unsafe {
             GetWriteWatch(
@@ -272,6 +286,14 @@ fn kernel_written(first: usize, last: usize) -> Option<Vec<(usize, u16)>> {
         {
             tally(10, u64::from(failed));
             tally(11, started.elapsed().as_nanos() as u64);
+        }
+        {
+            use std::sync::atomic::Ordering::Relaxed;
+            KERNEL[0].fetch_add(1, Relaxed);
+            KERNEL[1].fetch_add(((last - first) * PAGE) as u64, Relaxed);
+            KERNEL[2].fetch_add(began.elapsed().as_nanos() as u64, Relaxed);
+            KERNEL[3].fetch_add(if failed { 0 } else { count as u64 }, Relaxed);
+            KERNEL[4].fetch_add(u64::from(failed), Relaxed);
         }
         if failed {
             return None;
@@ -298,11 +320,43 @@ fn kernel_written(first: usize, last: usize) -> Option<Vec<(usize, u16)>> {
     })
 }
 
-/// Ranges of one submission closer than this are asked about together:
-/// walking the pages between them costs less than another kernel call (a
-/// call that resets written pages costs 30-70 microseconds whatever the
-/// range).
-const AHEAD_GAP: usize = (8 << 20) / PAGE;
+/// Ranges of one submission closer than this (pages) are asked about
+/// together: walking the pages between them costs less than another kernel
+/// call. `VICTORY_ASK_GAP_KB`, 8192 if not given. With the title's threads
+/// running a call that resets pages costs some 6.5 microseconds and walking
+/// 1.5-2 a MB ([`KERNEL`]): it pays to join ranges up to about 4 MB apart.
+fn ahead_gap() -> usize {
+    // (`VICTORY_AB` naming it: 2 MiB and 8 MiB, in turn.)
+    if let Some(on) = crate::ab::pick("VICTORY_ASK_GAP_KB") {
+        return (if on { 2048usize } else { 8192 } << 10) / PAGE;
+    }
+    static GAP: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    *GAP.get_or_init(|| {
+        let kb = std::env::var("VICTORY_ASK_GAP_KB").ok().and_then(|v| v.trim().parse::<usize>().ok()).unwrap_or(8192);
+        (kb << 10) / PAGE
+    })
+}
+
+/// Whether page range `[first, last)` lies in one of `ahead` (in order,
+/// apart, as [`merged`] leaves them).
+fn covered(ahead: &[(usize, usize)], first: usize, last: usize) -> bool {
+    let i = ahead.partition_point(|r| r.0 <= first);
+    i > 0 && ahead[i - 1].1 >= last
+}
+
+/// Page ranges in order, those that overlap or touch joined: what all of
+/// them asked is asked.
+fn merged(mut ranges: Vec<(usize, usize)>) -> Vec<(usize, usize)> {
+    ranges.sort_unstable();
+    let mut out: Vec<(usize, usize)> = Vec::with_capacity(ranges.len());
+    for (a, b) in ranges {
+        match out.last_mut() {
+            Some(last) if a <= last.1 => last.1 = last.1.max(b),
+            _ => out.push((a, b)),
+        }
+    }
+    out
+}
 /// The most one asking covers (its answer needs 8 bytes per 4 KiB page).
 const AHEAD_MAX: usize = (1 << 30) / PAGE;
 
@@ -337,7 +391,7 @@ pub(crate) fn ask_ahead(ranges: &[(usize, usize)]) {
         let mut last = pieces[i].1;
         let mut k = i + 1;
         while k < pieces.len()
-            && pieces[k].0 <= last + AHEAD_GAP
+            && pieces[k].0 <= last + ahead_gap()
             && last.max(pieces[k].1) - first <= AHEAD_MAX
         {
             last = last.max(pieces[k].1);
@@ -349,7 +403,7 @@ pub(crate) fn ask_ahead(ranges: &[(usize, usize)]) {
     note_hot(&written);
     let mut j = journal_mut();
     j.ahead_asked = next_asking();
-    j.ahead = asked;
+    j.ahead = merged(asked);
     let now = j.ahead_asked;
     for (page, parts) in written {
         j.note(page, parts, now);
@@ -532,18 +586,208 @@ pub(crate) fn ask_once(ranges: &[(usize, usize)]) {
         return;
     }
     ask_once_end();
+    // (From clankenjoyer/scarlet-fps, opt-in: memory quiet for some frames asked once a frame.)
+    if quiet_frames() > 0 {
+        ask_once_quiet(ranges);
+        return;
+    }
     ask_ahead(ranges);
     ask_rest(ranges);
+}
+
+/// From clankenjoyer/scarlet-fps (there "from Neptune/our fps fork"), opt-in. `VICTORY_ASK_QUIET=<frames>` (0 or unset: off): memory nothing
+/// was found written in for that many frames is asked about once a frame, not once a
+/// submission.
+///
+/// The kernel walks every page of a range it is asked about, and each of a frame's
+/// submissions asked about the ranges its lists refresh, mostly the same ones (Neptune: some
+/// 3,000 askings over 11 GB, a third of the submitting thread's time). Title memory is taken
+/// in blocks of 1 MiB here, and a block is asked about whole. One in which a written page was
+/// found within the last `frames` frames is asked about at every submission that refreshes
+/// part of it, as before; any other at the first such submission of a frame, and the journal
+/// answers for it until the next frame.
+///
+/// What changes: a write into a quiet block that arrives after the first asking of the frame
+/// is seen by the next frame, so a list later in the same frame draws from the bytes of
+/// before, once. From then on the block is asked about at every submission.
+fn quiet_frames() -> u64 {
+    static FRAMES: std::sync::OnceLock<u64> = std::sync::OnceLock::new();
+    *FRAMES.get_or_init(|| std::env::var("VICTORY_ASK_QUIET").ok().and_then(|v| v.trim().parse().ok()).unwrap_or(0))
+}
+
+/// Blocks that may lie between two blocks of one asking (`VICTORY_ASK_QUIET_GAP_MB`, 32: a
+/// clean page walked is a few nanoseconds, a call that resets pages some 50 microseconds).
+fn quiet_gap() -> usize {
+    static GAP: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+    *GAP.get_or_init(|| std::env::var("VICTORY_ASK_QUIET_GAP_MB").ok().and_then(|v| v.trim().parse().ok()).unwrap_or(32))
+}
+
+/// Journal pages to a block of [`quiet_frames`].
+const QUIET_BLOCK: usize = (1 << 20) / PAGE;
+
+/// Of a block: the frame it was last asked about whole (`u64::MAX`: never), the last frame
+/// a written page was found in it (`u64::MAX`: never), and whether asking about it whole
+/// fails (it is not all inside one write-watched reservation).
+#[derive(Clone, Copy)]
+struct Quiet {
+    asked: u64,
+    written: u64,
+    partial: bool,
+}
+
+const NEVER: Quiet = Quiet { asked: u64::MAX, written: u64::MAX, partial: false };
+
+struct QuietBlocks {
+    blocks: std::collections::HashMap<usize, Quiet, std::hash::BuildHasherDefault<PageHash>>,
+    frame: u64,
+}
+
+static QUIET: Mutex<Option<QuietBlocks>> = Mutex::new(None);
+
+/// Since the last frame line: blocks asked about because they were written lately, quiet
+/// blocks asked about as the first of a frame, ranges answered by the journal alone (an
+/// asking left out), ranges asked about on their own, kernel askings made.
+static QUIET_TOLD: [std::sync::atomic::AtomicU64; 5] = [const { std::sync::atomic::AtomicU64::new(0) }; 5];
+
+/// [`ask_once`] with [`quiet_frames`]: the same journal state at the end (the asking
+/// stands until [`ask_once_end`]), but quiet blocks asked once a frame.
+fn ask_once_quiet(ranges: &[(usize, usize)]) {
+    use std::sync::atomic::Ordering::Relaxed;
+    // (The frame count that exists in every build; `queue::presented` is diagnostics only.)
+    let frame = crate::frame::current();
+    let keep = quiet_frames();
+    // Not view memory known by its bits: the kernel would refuse it.
+    let ranges: Vec<(usize, usize)> = ranges
+        .iter()
+        .filter(|r| r.0 < r.1 && !published(r.0, r.1))
+        .map(|&(start, end)| (start / PAGE, end.div_ceil(PAGE)))
+        .collect();
+    let _all = Asking::hold_all();
+    let mut held = QUIET.lock().unwrap_or_else(|e| e.into_inner());
+    let state = held.get_or_insert_with(|| QuietBlocks { blocks: Default::default(), frame });
+    state.frame = frame;
+    let lately = |q: &Quiet| q.written != u64::MAX && frame.wrapping_sub(q.written) <= keep;
+    // The blocks to ask about now.
+    let mut wanted: Vec<usize> = Vec::new();
+    for &(first, last) in &ranges {
+        for block in first / QUIET_BLOCK..=(last - 1) / QUIET_BLOCK {
+            let q = *state.blocks.entry(block).or_insert(NEVER);
+            if !q.partial && (q.asked != frame || lately(&q)) {
+                wanted.push(block);
+            }
+        }
+    }
+    wanted.sort_unstable();
+    wanted.dedup();
+    let mut written: Vec<(usize, u16)> = Vec::new();
+    // Asks about blocks `[first, last)` whole and notes it in them; false if the kernel does
+    // not answer for all of it.
+    let ask_blocks = |state: &mut QuietBlocks, written: &mut Vec<(usize, u16)>, first: usize, last: usize| -> bool {
+        QUIET_TOLD[4].fetch_add(1, Relaxed);
+        let Some(pages) = kernel_written(first * QUIET_BLOCK, last * QUIET_BLOCK) else {
+            return false;
+        };
+        for block in first..last {
+            let q = state.blocks.entry(block).or_insert(NEVER);
+            QUIET_TOLD[if q.asked == frame || lately(&*q) { 0 } else { 1 }].fetch_add(1, Relaxed);
+            q.asked = frame;
+        }
+        for &(page, _) in &pages {
+            if let Some(q) = state.blocks.get_mut(&(page / QUIET_BLOCK)) {
+                q.written = frame;
+            }
+        }
+        written.extend(pages);
+        true
+    };
+    let mut i = 0;
+    while i < wanted.len() {
+        let mut k = i + 1;
+        // Blocks a few MiB apart are one asking: the kernel walks the pages between them in
+        // less time than another call takes (and they count as asked about). At most 1 GiB
+        // an asking (its answer needs 8 bytes per 4 KiB page).
+        while k < wanted.len() && wanted[k] <= wanted[k - 1] + 1 + quiet_gap() && wanted[k] - wanted[i] < AHEAD_MAX / QUIET_BLOCK {
+            k += 1;
+        }
+        let run = &wanted[i..k];
+        let whole = ask_blocks(state, &mut written, run[0], run[run.len() - 1] + 1);
+        if !whole && run.len() > 1 {
+            // One of them is not all write-watched memory: each on its own.
+            for &block in run {
+                if !ask_blocks(state, &mut written, block, block + 1)
+                    && let Some(q) = state.blocks.get_mut(&block)
+                {
+                    q.partial = true;
+                }
+            }
+        } else if !whole && let Some(q) = state.blocks.get_mut(&run[0]) {
+            q.partial = true;
+        }
+        i = k;
+    }
+    // What the journal now answers for: a range whose blocks were all asked about this
+    // frame. Any other is asked about on its own, as without the switch.
+    let mut ahead: Vec<(usize, usize)> = Vec::new();
+    for &(first, last) in &ranges {
+        let covered = (first / QUIET_BLOCK..=(last - 1) / QUIET_BLOCK)
+            .all(|block| state.blocks.get(&block).is_some_and(|q| !q.partial && q.asked == frame));
+        if covered {
+            QUIET_TOLD[2].fetch_add(1, Relaxed);
+            ahead.push((first, last));
+        } else if !ahead.iter().any(|&(a, b)| a <= first && last <= b) {
+            QUIET_TOLD[4].fetch_add(1, Relaxed);
+            if let Some(pages) = kernel_written(first, last) {
+                QUIET_TOLD[3].fetch_add(1, Relaxed);
+                written.extend(pages);
+                ahead.push((first, last));
+            }
+        }
+    }
+    drop(held);
+    note_hot(&written);
+    let mut j = journal_mut();
+    // One number for everything noted here, which this submission's asking stands under.
+    let now = next_asking();
+    j.ahead_asked = now;
+    for (page, parts) in written {
+        j.note(page, parts, now);
+    }
+    j.kept = !ahead.is_empty();
+    j.ahead = merged(ahead);
+}
+
+/// [`QUIET_TOLD`], taken.
+pub(crate) fn quiet_take() -> [u64; 5] {
+    std::array::from_fn(|i| QUIET_TOLD[i].swap(0, std::sync::atomic::Ordering::Relaxed))
+}
+
+/// The frame line of [`quiet_frames`], when it is on.
+pub(crate) fn quiet_line(told: [u64; 5], frames: f64) {
+    if quiet_frames() == 0 {
+        return;
+    }
+    let t: Vec<f64> = told.iter().map(|&n| n as f64 / frames).collect();
+    let known = QUIET.lock().unwrap_or_else(|e| e.into_inner()).as_ref().map_or(0, |q| q.blocks.len());
+    tracing::info!(
+        "title memory asked about per frame (VICTORY_ASK_QUIET={}): {:.0} blocks of 1 MiB written lately, {:.0} quiet ones as the          first of a frame, {:.0} ranges answered from the journal alone (askings left out), {:.0} ranges on their own; {:.0}          kernel askings in all; {known} blocks known",
+        quiet_frames(),
+        t[0],
+        t[1],
+        t[2],
+        t[3],
+        t[4],
+    );
 }
 
 /// [`ask_once`] after its [`ask_ahead`]: what that left to `writes`, and the
 /// asking stands.
 fn ask_rest(ranges: &[(usize, usize)]) {
     let _all = Asking::hold_all();
-    let mut ahead = {
+    let ahead = {
         let mut j = journal_mut();
         std::mem::take(&mut j.ahead)
     };
+    let mut alone: Vec<(usize, usize)> = Vec::new();
     // `ask_ahead` leaves a range that lies alone to `writes`, which asks
     // once per flush: with one asking for the submission that was every
     // such range asked again at each of its 70 flushes (run 76: 2,300
@@ -555,11 +799,12 @@ fn ask_rest(ranges: &[(usize, usize)]) {
             continue;
         }
         let (first, last) = (start / PAGE, end.div_ceil(PAGE));
-        if !ahead.iter().any(|&(a, b)| a <= first && last <= b)
+        if !covered(&ahead, first, last)
+            && !alone.iter().any(|&(a, b)| a <= first && last <= b)
             && let Some(pages) = kernel_written(first, last)
         {
             written.extend(pages);
-            ahead.push((first, last));
+            alone.push((first, last));
         }
     }
     note_hot(&written);
@@ -573,6 +818,7 @@ fn ask_rest(ranges: &[(usize, usize)]) {
     for (page, parts) in written {
         j.note(page, parts, now);
     }
+    let ahead = if alone.is_empty() { ahead } else { merged([ahead, alone].concat()) };
     j.kept = !ahead.is_empty();
     j.ahead = ahead;
 }
@@ -647,10 +893,7 @@ fn ask_run(pieces: &[(usize, usize)], asked: &mut Vec<(usize, usize)>, written: 
 pub(crate) fn asked(start: usize, end: usize) -> Option<(u64, Vec<(usize, u64)>)> {
     let (first, last) = (start / PAGE, end.div_ceil(PAGE));
     let j = journal();
-    j.ahead
-        .iter()
-        .any(|&(a, b)| a <= first && last <= b)
-        .then(|| (j.ahead_asked, j.written.range(first..last).map(|(&p, &w)| (p, w)).collect()))
+    covered(&j.ahead, first, last).then(|| (j.ahead_asked, j.written.range(first..last).map(|(&p, &w)| (p, w)).collect()))
 }
 
 /// The pages of `[start, end)` (whole pages) as last written, for pages
@@ -662,7 +905,7 @@ pub(crate) fn writes(start: usize, end: usize, guarded: bool) -> Option<(u64, Ve
     let (first, last) = (start / PAGE, end.div_ceil(PAGE));
     let of = |j: &Journal| -> Vec<(usize, u64)> { j.written.range(first..last).map(|(&p, &w)| (p, w)).collect() };
     // Asked ahead with the submission's other ranges: the journal has it.
-    let ahead = |j: &Journal| j.ahead.iter().any(|&(a, b)| a <= first && last <= b).then(|| (j.ahead_asked, of(j)));
+    let ahead = |j: &Journal| covered(&j.ahead, first, last).then(|| (j.ahead_asked, of(j)));
     if let Some(known) = ahead(&journal()) {
         return Some(known);
     }
@@ -746,7 +989,7 @@ pub(crate) fn nothing_new(start: usize, end: usize, base: usize, copied: &[u64],
         crate::faultbook::note(crate::faultbook::What::Known, first, last, 1);
     }
     let j = journal();
-    if !known && !j.ahead.iter().any(|&(a, b)| a <= first && last <= b) {
+    if !known && !covered(&j.ahead, first, last) {
         return false;
     }
     let Some(taken) = first.checked_sub(base).and_then(|from| copied.get(from..last - base)) else {
@@ -2666,6 +2909,21 @@ fn writable(at: usize) -> bool {
 #[cfg(test)]
 mod parts_tests {
     use super::*;
+
+    /// Asked ranges joined where they overlap or touch, and a range is
+    /// covered only if one joined range holds all of it.
+    #[test]
+    fn asked_ranges_are_joined_and_looked_up() {
+        let ahead = merged(vec![(40, 50), (10, 20), (20, 25), (12, 14), (60, 61)]);
+        assert_eq!(ahead, vec![(10, 25), (40, 50), (60, 61)]);
+        for (first, last, yes) in
+            [(10, 25, true), (11, 12, true), (24, 25, true), (9, 11, false), (24, 26, false), (25, 40, false), (40, 50, true), (45, 51, false), (60, 61, true), (0, 1, false), (70, 71, false)]
+        {
+            assert_eq!(covered(&ahead, first, last), yes, "{first}..{last}");
+            assert_eq!(ahead.iter().any(|&(a, b)| a <= first && last <= b), yes, "as the walk said, {first}..{last}");
+        }
+        assert!(!covered(&[], 0, 1));
+    }
 
     #[test]
     fn the_parts_of_a_page_written_since_it_was_taken() {

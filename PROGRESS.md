@@ -47,6 +47,28 @@ tied to `VICTORY_RELAY=2` / `VICTORY_CARD_STEPS=2` (gone with the safe settings,
 | `VICTORY_RENDER_SCALE=0.5` through the FSR DLL, FSR's maximum left alone (now the default of the patch) | measured here | picture right; card 69 % busy; 51-58 ms in the cell: **the CPU now sets the frame time** |
 | compares and rehashes batched per copy (`VICTORY_CARD_BATCH`, tried) | measured here | 53.5 -> 54.2 ms, no gain: 400 compared ranges a frame are 400 different copies, and the rehash list's time is its uploads; reverted |
 
+### 2026-11-27: the submitting thread, other forks, Agility SDK, 60 fps (VIctoryUnified v1.1)
+
+Measured with the walk-free cell runs (half scale through FSR, 200 s, frame times from 160 s,
+"steady") on one build; identical settings spread about +-5 % between runs, so one run says little
+under that.
+
+| Change | Source | Result | Default |
+|---|---|---|---|
+| `card_dirty` looks only at copies touched since it last ran (`VICTORY_TOUCHED_LIST`) | here | same results by construction (test); new build 24.1 steady over 3 runs, installed v1.0 exe 23.65 over 2 | on |
+| write-watch counters: an asking costs 1.5-2 us per MB of range with the title running, 6.5 us if it resets a page; askings from several threads do not overlap; submissions ask about ~1 GB a frame (4 ms) | here (`ww` measure) | | logging |
+| asking only the refreshed ranges (`VICTORY_ASK_EXACT`), a 2 MiB gap (`VICTORY_ASK_GAP_KB`) | here | 1,000 MB a frame asked either way; no gain | off |
+| descriptor sync begun first (`VICTORY_HEAP_SYNC_FIRST`) | scarlet-fps | within the spread | off |
+| `VICTORY_ASK_QUIET=30` | scarlet-fps (after Neptune) | 21.1 against 24.1: worse | off |
+| `VICTORY_COPY_BESIDE` + `STORE_BESIDE` | scarlet-fps / 3070 | 23.1: no gain | off |
+| `VICTORY_GPU_BACK_MAX_KB=1024` | scarlet-fps | 26.7, but the game behaved differently (the story moved on otherwise): what its code reads of shader results is no longer there | off |
+| `VICTORY_PORT_CONSTANTS` | scarlet-fps | never applies here: the 174 MB heap is one section in rotated order (three views); foxhound reports it slower on a 12 GB card | off |
+| decal heap defragmentation left out (`VICTORY_MEASURE_LEAVE_OUT=02384a60fda6f2d0`, measuring only) | | 23.7 against 24.1: the pass costs ~1 ms or less in our paired-lane translation (11.85 ms in scarlet-fps'); nothing to skip or optimise | never |
+| DLSS through OptiScaler 0.9.5 (`START-DLSS.bat`) | OptiScaler | 23.2 against 24.1, picture right | optional |
+| DirectX 12 Agility SDK 1.620.2 at run time (`agility.rs`) | Marvisak/VIctory #969 | exe exports without the DLL refuse every device (0x887E0003, measured): loaded through `ID3D12SDKConfiguration1` instead; loads with the folder, Windows' runtime without (both checked) | set up by the launcher |
+| 60 fps frame interval (`VICTORY_FRAME_INTERVAL_MS=16.667`) | scarlet-fps | menus and videos at 60 | launcher on |
+| opt-in, not measured yet: `VICTORY_SECTION_MB` (Vilocity), `VICTORY_SYNC_FINE`, `VICTORY_SYNC_IN_PLACE` (Yaekai), `VICTORY_THREAD_TICKET` (VIctory-NVIDIA) | | next series | off |
+
 ### The scarlett-fox branch (victory-scarlett-3070, cool_fox f4b48ad + Scarlett), merged
 
 Merged on branch `scarlett-merge` (three-way from e12c29f; our translator, cache key, E5 switch

@@ -25,6 +25,7 @@
 mod stubs;
 mod hooks;
 mod crash;
+pub mod frame_rate;
 pub mod prepare;
 pub(crate) mod publish;
 pub mod resolve;

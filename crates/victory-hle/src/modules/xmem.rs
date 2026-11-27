@@ -642,55 +642,64 @@ pub extern "system" fn XMemAllocatePhysicalPages(
     }
     // SAFETY: checked non-null.
     let n = unsafe { *count };
-    let Some(size) = n.checked_mul(PAGE).filter(|&s| s > 0) else {
+    if n.checked_mul(PAGE).filter(|&s| s > 0).is_none() {
         return 0;
-    };
-    // A pagefile-backed section of `size` bytes, its pages committed when
-    // first mapped or written (`commit`): the title asks for 6.1
-    // GiB at once, which a busy host often cannot commit (error 1450).
-    // SAFETY: plain section creation.
-    let handle = unsafe {
-        CreateFileMappingW(
-            INVALID_HANDLE_VALUE,
-            std::ptr::null(),
-            // Under Wine a committed section is a sparse file, free until
-            // touched, and committing a reserved one page by page costs a
-            // wineserver request each that scans every range committed so
-            // far: commit it whole there.
-            PAGE_READWRITE | if on_wine() { SEC_COMMIT } else { SEC_RESERVE },
-            (size as u64 >> 32) as u32,
-            size as u32,
-            std::ptr::null(),
-        )
-    };
-    if handle.is_null() {
-        let error = std::io::Error::last_os_error();
-        tracing::warn!(n, %error, "XMemAllocatePhysicalPages failed");
-        // SAFETY: checked non-null.
-        unsafe { count.write(0) };
-        return 0;
+    }
+    // (From voidopcode/vilocity) In sections of `per` pages at most ([`section_pages`]).
+    let per = section_pages();
+    let mut sections: Vec<Arc<Section>> = Vec::new();
+    for start in (0..n).step_by(per) {
+        let pages = (n - start).min(per);
+        let size = pages * PAGE;
+        // A pagefile-backed section of `size` bytes, its pages committed when
+        // first mapped or written (`commit`): the title asks for 6.1
+        // GiB at once, which a busy host often cannot commit (error 1450).
+        // SAFETY: plain section creation.
+        let handle = unsafe {
+            CreateFileMappingW(
+                INVALID_HANDLE_VALUE,
+                std::ptr::null(),
+                // Under Wine a committed section is a sparse file, free until
+                // touched, and committing a reserved one page by page costs a
+                // wineserver request each that scans every range committed so
+                // far: commit it whole there.
+                PAGE_READWRITE | if on_wine() { SEC_COMMIT } else { SEC_RESERVE },
+                (size as u64 >> 32) as u32,
+                size as u32,
+                std::ptr::null(),
+            )
+        };
+        if handle.is_null() {
+            let error = std::io::Error::last_os_error();
+            tracing::warn!(n, %error, "XMemAllocatePhysicalPages failed");
+            // (The sections made so far close as `sections` drops.)
+            // SAFETY: checked non-null.
+            unsafe { count.write(0) };
+            return 0;
+        }
+        // For the GPU side's in-place census: only a committed section can be
+        // opened as a host heap.
+        victory_gpu::title_memory_section(handle as usize, size as u64, on_wine());
+        sections.push(Arc::new(Section {
+            handle,
+            pages,
+            window: std::sync::OnceLock::new(),
+            committed: (0..pages.div_ceil(64)).map(|_| std::sync::atomic::AtomicU64::new(0)).collect(),
+        }));
     }
     tracing::debug!(
         n,
+        sections = sections.len(),
         flags = format_args!("{flags:#x}"),
         "XMemAllocatePhysicalPages"
     );
-    // For the GPU side's in-place census: only a committed section can be
-    // opened as a host heap.
-    victory_gpu::title_memory_section(handle as usize, size as u64, on_wine());
-    let section = Arc::new(Section {
-        handle,
-        pages: n,
-        window: std::sync::OnceLock::new(),
-        committed: (0..n.div_ceil(64)).map(|_| std::sync::atomic::AtomicU64::new(0)).collect(),
-    });
     let mut table = page_table_mut();
     let first = table.next_page;
     table.next_page += n * FRAMES;
     for index in 0..n {
         let slice = Slice {
-            section: section.clone(),
-            index,
+            section: sections[index / per].clone(),
+            index: index % per,
         };
         table.pages.insert(first + index * FRAMES, slice);
     }
@@ -703,6 +712,43 @@ pub extern "system" fn XMemAllocatePhysicalPages(
     }
     1
 }
+
+/// (From voidopcode/vilocity, GPL-3.0-or-later; the finding and the cure are RyanCase94's and CuteBooty's,
+/// fxceless/victory-fork#1089 and #1274, and KainanP's, Marvisak/VIctory#3177.)
+/// How many pages one section holds at most: `VICTORY_SECTION_MB` MiB of them
+/// (0: one section for a whole request, as before, and the default until measured here;
+/// Vilocity's default is 2), one section under Wine.
+///
+/// The title asks for its 6.1 GiB of pages in one call and maps them a 64 KiB
+/// page at a time: one section with views by the hundred thousand. Windows'
+/// worker that rebuilds large pages trades a section's pages one at a time,
+/// walks the section's views for each, and holds the section's lock
+/// meanwhile, which every map and unmap of the title's pages waits for. Here,
+/// running through the world (Ryzen 9 9950X3D, 150 s): 211,000 unmaps of
+/// 182 us and 205,000 maps of 114 us each, 848 ms of mapping calls in every
+/// second, and 11-18 fps; standing still the same calls take 10 us. In
+/// sections of 2 MiB such a trade walks a few dozen views and holds one small
+/// section.
+///
+/// What goes by sections sees more of them: a run of pages for a mapping or a
+/// write ends at a section's end as it did at a request's ([`runs`]), and a
+/// DirectStorage write over such an end goes through `write_physical`.
+fn section_pages() -> usize {
+    static PAGES: LazyLock<usize> = LazyLock::new(|| {
+        let mb = std::env::var("VICTORY_SECTION_MB").ok().and_then(|v| v.trim().parse::<usize>().ok());
+        pages_per_section(if on_wine() { 0 } else { mb.unwrap_or(0) })
+    });
+    *PAGES
+}
+
+/// `mb` MiB in pages; 0: no end.
+fn pages_per_section(mb: usize) -> usize {
+    match mb.saturating_mul(MIB / PAGE) {
+        0 => usize::MAX,
+        pages => pages,
+    }
+}
+
 
 /// Page numbers count 4 KiB frames, so a 64 KiB page's is a multiple of
 /// 16: the title keeps them as 21-bit `number >> 4` and rebuilds

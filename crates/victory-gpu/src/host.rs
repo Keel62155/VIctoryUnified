@@ -843,6 +843,9 @@ pub(crate) fn host() -> Option<&'static Host> {
 }
 
 fn create() -> windows::core::Result<Host> {
+    // The DirectX 12 Agility SDK beside the executable, if there, before any debug interface
+    // or device exists (`crate::agility`; Windows' own runtime otherwise).
+    crate::agility::load();
     // SAFETY: plain D3D12 object creation with valid descriptions.
     unsafe {
         // The debug layer only in builds with diagnostics.
@@ -2151,6 +2154,44 @@ fn rehash_runs() -> bool {
 /// card's memory: hash passes after ranges were sent up, the pieces they
 /// hashed, and compare passes after the lists.
 static CARD_PASSES: [std::sync::atomic::AtomicU64; 3] = [const { std::sync::atomic::AtomicU64::new(0) }; 3];
+
+/// Since the last frame-rate line, of the frames shown: the title frames it was ahead of each
+/// (summed), the frames shown, the most it was ahead (a frame's memory the title reuses after
+/// so many frames is read by us that late; research brief E12).
+static AHEAD: [std::sync::atomic::AtomicU64; 3] = [const { std::sync::atomic::AtomicU64::new(0) }; 3];
+
+/// Since the last frame-rate line, of the submissions' one write-watch
+/// asking (`crate::watch::ask_once`): askings, the ranges given, their
+/// bytes, nanoseconds.
+static ASK_ONCE: [std::sync::atomic::AtomicU64; 4] = [const { std::sync::atomic::AtomicU64::new(0) }; 4];
+
+/// Whether a submission's one write-watch asking is about the ranges it
+/// refreshes (`VICTORY_ASK_EXACT=1`) rather than, per copy, the span from
+/// the first to the last of them (as before). The kernel's asking costs by
+/// the range it walks (`crate::watch::KERNEL`).
+/// Whether the window title always says how frame generation stands (`VICTORY_FG_CAPTION=1`,
+/// set by START-DLSS.bat): "FG off", or its factor and the frames shown a second.
+fn fg_caption() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("VICTORY_FG_CAPTION").is_some_and(|v| v == "1"))
+}
+
+fn heap_sync_first() -> bool {
+    if let Some(on) = crate::ab::pick("VICTORY_HEAP_SYNC_FIRST") {
+        return on;
+    }
+    // Off unless `=1`: no gain measured beyond the runs' spread yet (2026-11-27).
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("VICTORY_HEAP_SYNC_FIRST").is_some_and(|v| v == "1"))
+}
+
+fn ask_exact() -> bool {
+    if let Some(on) = crate::ab::pick("VICTORY_ASK_EXACT") {
+        return on;
+    }
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("VICTORY_ASK_EXACT").is_some_and(|v| v == "1"))
+}
 
 /// Whether what shaders wrote to copies in the card's memory is merged
 /// into title memory on several threads (`VICTORY_WIDE_MERGE=1`; off by
@@ -5533,6 +5574,14 @@ impl Host {
         let ahead = Split::begin();
         #[cfg(feature = "diagnostics")]
         SPLIT[11].fetch_add(called.elapsed().as_nanos() as u64, Ordering::Relaxed);
+        // The heaps' records (`crate::descriptor::sync_heaps`) are begun
+        // here, with `VICTORY_HEAP_SYNC_FIRST=1` (as in scarlet-fps; off by
+        // default until measured): the title wrote them before it sent the lists, and
+        // the round runs beside the card's steps and the flights' waits as
+        // well. A submission that waits for flights begins another round
+        // after the wait (what landed is title memory written), and waits for
+        // that one. Waited for where it was begun before (`heaps_synced`).
+        let mut synced_first = (late && heap_sync_first()).then(crate::descriptor::begin_sync_heaps);
         stage.next("submit: steps given to the card");
         // Flights in the air ([`late`]): a submission that is waited for
         // settles them first, one sent ahead only if preparing it reads
@@ -5556,12 +5605,19 @@ impl Host {
             } else {
                 self.settle(&mut submitted, why);
             }
+            // (Rounds run in order: who waits for the new one has waited for
+            // the one begun before the wait, which is let go unwaited.)
+            if synced_first.is_some()
+                && let Some(before) = synced_first.replace(crate::descriptor::begin_sync_heaps())
+            {
+                std::mem::forget(before);
+            }
         }
         #[cfg(feature = "diagnostics")]
         ahead.part(13);
         // Descriptors the title copied into placed heaps directly, before
         // command lists that index those slots are submitted.
-        let heaps_synced = crate::descriptor::begin_sync_heaps();
+        let heaps_synced = synced_first.unwrap_or_else(crate::descriptor::begin_sync_heaps);
         // That list runs first, and is one of the submission's from here on.
         let with: Vec<&HostList>;
         let runs = match &own {
@@ -5620,24 +5676,55 @@ impl Host {
         // One write-watch asking for everything the submission refreshes
         // (`VICTORY_ASK_ONCE`): per copy, the span of its refreshed ranges.
         if crate::watch::once() {
-            let mut spans: ByCopy<(usize, usize)> = ByCopy::default();
-            for list in runs {
-                for step in &list.deferred().copies {
-                    if let Step::Refresh(shadow, address, len) = step
-                        && shadow.asked_ahead()
-                    {
-                        let span = spans
-                            .entry(std::sync::Arc::as_ptr(shadow) as usize)
-                            .or_insert((*address, *address + *len));
-                        *span = (span.0.min(*address), span.1.max(*address + *len));
+            let ranges: Vec<(usize, usize)> = if ask_exact() {
+                // The refreshed ranges themselves, joined where they touch:
+                // the span of a copy's ranges walked all of a 174 MB heap
+                // between them, at 1.5-2 microseconds a MB.
+                let mut all: Vec<(usize, usize)> = Vec::new();
+                for list in runs {
+                    for step in &list.deferred().copies {
+                        if let Step::Refresh(shadow, address, len) = step
+                            && shadow.asked_ahead()
+                            && *len > 0
+                        {
+                            all.push((*address, *address + *len));
+                        }
                     }
                 }
-            }
-            let ranges: Vec<(usize, usize)> = spans.into_values().collect();
+                all.sort_unstable();
+                let mut joined: Vec<(usize, usize)> = Vec::with_capacity(all.len());
+                for (a, b) in all {
+                    match joined.last_mut() {
+                        Some(last) if a <= last.1 => last.1 = last.1.max(b),
+                        _ => joined.push((a, b)),
+                    }
+                }
+                joined
+            } else {
+                let mut spans: ByCopy<(usize, usize)> = ByCopy::default();
+                for list in runs {
+                    for step in &list.deferred().copies {
+                        if let Step::Refresh(shadow, address, len) = step
+                            && shadow.asked_ahead()
+                        {
+                            let span = spans
+                                .entry(std::sync::Arc::as_ptr(shadow) as usize)
+                                .or_insert((*address, *address + *len));
+                            *span = (span.0.min(*address), span.1.max(*address + *len));
+                        }
+                    }
+                }
+                spans.into_values().collect()
+            };
+            let asking = std::time::Instant::now();
             #[cfg(feature = "diagnostics")]
             SPLIT[8].fetch_add(split.so_far(), Ordering::Relaxed);
             stage.next("submit: asking the write watch");
             crate::watch::ask_once(&ranges);
+            ASK_ONCE[0].fetch_add(1, Ordering::Relaxed);
+            ASK_ONCE[1].fetch_add(ranges.len() as u64, Ordering::Relaxed);
+            ASK_ONCE[2].fetch_add(ranges.iter().map(|r| (r.1 - r.0) as u64).sum::<u64>(), Ordering::Relaxed);
+            ASK_ONCE[3].fetch_add(asking.elapsed().as_nanos() as u64, Ordering::Relaxed);
             #[cfg(feature = "diagnostics")]
             split.part(0);
             stage.next("submit: title bytes under flights' writes");
@@ -6975,6 +7062,22 @@ impl HostList {
         address: usize,
         len: usize,
     ) {
+        // `VICTORY_GPU_BACK_MAX_KB=n` (from clankenjoyer/scarlet-fps; unset: every range, as
+        // before): a range over n KiB is not copied back and nothing waits for it; 0 copies
+        // none. What shaders write there stays on the card, and title memory keeps its old
+        // bytes: what the title's CPU reads there, or writes there in part, is not what the
+        // card holds. Opt-in, for measuring.
+        static MOST: std::sync::OnceLock<Option<usize>> = std::sync::OnceLock::new();
+        let most = *MOST.get_or_init(|| {
+            let most = std::env::var("VICTORY_GPU_BACK_MAX_KB").ok().and_then(|v| v.trim().parse::<usize>().ok());
+            if let Some(kb) = most {
+                tracing::warn!("shader writes of ranges over {kb} KiB are not copied back into title memory (VICTORY_GPU_BACK_MAX_KB)");
+            }
+            most.map(|kb| kb << 10)
+        });
+        if most.is_some_and(|most| most == 0 || len > most) {
+            return;
+        }
         let mut deferred = self.deferred();
         let key = (std::sync::Arc::as_ptr(shadow) as usize, address, len);
         if deferred.gpu_written.insert(key) || !declare_once() {
@@ -8724,6 +8827,10 @@ struct Meter {
     logged: std::time::Instant,
     /// The caption the window had, once read.
     caption: Option<Vec<u16>>,
+    /// The swap chain's count of presents when this second began (`GetLastPresentCount`):
+    /// with frame generation (OptiScaler) the frames it makes are presented too, so this
+    /// counts the frames shown, `frames` those the title made.
+    shown_from: Option<u32>,
 }
 
 impl Meter {
@@ -8737,6 +8844,7 @@ impl Meter {
             drawn: crate::draw::drawn(),
             logged: now,
             caption: None,
+            shown_from: None,
         }
     }
 
@@ -8747,7 +8855,7 @@ impl Meter {
     }
 
     /// Counts a presented frame.
-    fn frame(&mut self, hwnd: HWND) {
+    fn frame(&mut self, hwnd: HWND, presents: Option<u32>) {
         #[cfg(feature = "diagnostics")]
         tracing::debug!(target: "victory_gpu::frame", token = crate::frame::current(), "present");
         #[cfg(feature = "diagnostics")]
@@ -8757,10 +8865,19 @@ impl Meter {
         {
             self.copy_stats_frames += 1;
         }
+        if self.shown_from.is_none() {
+            self.shown_from = presents;
+        }
         let elapsed = self.since.elapsed();
         if elapsed < std::time::Duration::from_secs(1) {
             return;
         }
+        // Frames shown a second, made and generated (`None`: not known).
+        let shown = match (self.shown_from, presents) {
+            (Some(from), Some(now)) if now >= from => Some(f64::from(now - from) / elapsed.as_secs_f64()),
+            _ => None,
+        };
+        self.shown_from = presents;
         let drawn = crate::draw::drawn();
         let frames = f64::from(self.frames);
         let fps = frames / elapsed.as_secs_f64();
@@ -8848,6 +8965,11 @@ impl Meter {
         let planes = crate::resource::PLANES[0].swap(0, Ordering::Relaxed) as f64 / frames;
         // Copies in the card's memory (`crate::shadow::cards`).
         let card = crate::shadow::card_stats();
+        // The write watch (as `card`: over the same frames).
+        let kernel = crate::watch::kernel_asks();
+        let quiet = crate::watch::quiet_take();
+        let ahead = AHEAD.each_ref().map(|c| c.swap(0, Ordering::Relaxed));
+        let once = ASK_ONCE.each_ref().map(|c| c.swap(0, Ordering::Relaxed));
         #[cfg(feature = "diagnostics")]
         let slow = crate::watch::slow_asks();
         // Over the same frames as the counts above.
@@ -8923,6 +9045,30 @@ impl Meter {
                 slow[1] as f64 / 1e3 / frames,
                 slow[2] as f64 / 1e3
             );
+            tracing::info!(
+                "write watch per frame, all threads: {:.0} kernel askings over {:.0} MB, {:.2} ms, {:.0} pages found written, \
+                 {:.0} refused; the submissions' one asking: {:.1} a frame over {:.0} ranges of {:.0} MB, {:.2} ms \
+                 (VICTORY_ASK_EXACT={}, VICTORY_ASK_GAP_KB={})",
+                kernel[0] as f64 / frames,
+                kernel[1] as f64 / 1048576.0 / frames,
+                kernel[2] as f64 / 1e6 / frames,
+                kernel[3] as f64 / frames,
+                kernel[4] as f64 / frames,
+                once[0] as f64 / frames,
+                once[1] as f64 / frames,
+                once[2] as f64 / 1048576.0 / frames,
+                once[3] as f64 / 1e6 / frames,
+                u8::from(ask_exact()),
+                std::env::var("VICTORY_ASK_GAP_KB").unwrap_or_else(|_| "8192".into()),
+            );
+            crate::watch::quiet_line(quiet, frames);
+            tracing::info!(
+                "the title ahead of the frame shown: {:.2} frames on average, {} at most ({} frames shown)",
+                ahead[0] as f64 / ahead[1].max(1) as f64,
+                ahead[2],
+                ahead[1]
+            );
+            crate::port::log(frames);
             if crate::shadow::cards() {
                 let per_frame = |i: usize| card[i] as f64 / frames;
                 tracing::info!(
@@ -8999,7 +9145,17 @@ impl Meter {
             self.caption = Some(buffer);
         }
         let Some(caption) = &self.caption else { return };
-        let text = format!(" | VIctory {fps:.0} fps {ms:.1} ms/frame {draws:.0} draws/frame");
+        // Real frames first; with frame generation (`VICTORY_FG_CAPTION=1`, set by
+        // START-DLSS.bat, or more frames shown than made) its factor and the frames shown.
+        let generation = match shown {
+            Some(out) if fps > 0.5 && (fg_caption() || out > fps * 1.3) => {
+                let factor = out / fps;
+                if factor < 1.3 { " | FG off".to_owned() } else { format!(" | FG {factor:.0}x {out:.0} fps") }
+            }
+            _ if fg_caption() => " | FG ?".to_owned(),
+            _ => String::new(),
+        };
+        let text = format!(" | VIctory {fps:.0} fps{generation} | {ms:.1} ms/frame {draws:.0} draws/frame");
         let mut text: Vec<u16> = caption.iter().copied().chain(text.encode_utf16()).collect();
         text.push(0);
         // Setting the text waits for the window's thread (a title thread,
@@ -9073,6 +9229,16 @@ impl Host {
         frame: u64,
     ) -> Option<bool> {
         note_frame_time();
+        // `VICTORY_AB` in release builds (diagnostics builds call it at the title's present).
+        #[cfg(not(feature = "diagnostics"))]
+        crate::ab::presented(|_, _, _| {});
+        // How far the title is ahead of the frame shown now, in its frames.
+        {
+            let ahead = crate::frame::current().saturating_sub(frame);
+            AHEAD[0].fetch_add(ahead, Ordering::Relaxed);
+            AHEAD[1].fetch_add(1, Ordering::Relaxed);
+            AHEAD[2].fetch_max(ahead, Ordering::Relaxed);
+        }
         // SAFETY: a live resource.
         let desc = unsafe { texture.GetDesc() };
         let planes = overlay.and_then(|(over, over_state)| {
@@ -9343,7 +9509,9 @@ impl Host {
             showing.next("the frame meter");
             #[cfg(feature = "diagnostics")]
             p.panel.frame(p.meter.line_due());
-            p.meter.frame(p.hwnd);
+            // SAFETY: a live swap chain.
+            let presents = unsafe { p.swap_chain.GetLastPresentCount() }.ok();
+            p.meter.frame(p.hwnd, presents);
             showing.end();
             #[cfg(feature = "diagnostics")]
             return Some(probe.is_some_and(|b| crate::capture::black(&b)));
