@@ -167,8 +167,35 @@ enum Console {
     SeriesS,
 }
 
+/// For profile-guided optimization (`--features pgo`, with `-Cprofile-generate`): the profile
+/// is written by LLVM's runtime at a clean exit, and a game session ends when the window is
+/// closed or the process ended; so a thread writes it every `VICTORY_PGO_DUMP_SECS` seconds
+/// (default 20) and the last write before the end is what is merged.
+/// The global allocator (`mimalloc` feature, on by default): the Windows heap took about a
+/// quarter of the submitting thread's samples (allocations, frees, its lock).
+#[cfg(feature = "mimalloc")]
+#[global_allocator]
+static ALLOCATOR: mimalloc::MiMalloc = mimalloc::MiMalloc;
+
+#[cfg(feature = "pgo")]
+fn pgo_dumps() {
+    unsafe extern "C" {
+        fn __llvm_profile_write_file() -> i32;
+    }
+    let every = std::env::var("VICTORY_PGO_DUMP_SECS").ok().and_then(|v| v.parse().ok()).unwrap_or(20u64);
+    let _ = std::thread::Builder::new().name("victory-pgo".into()).spawn(move || {
+        loop {
+            std::thread::sleep(std::time::Duration::from_secs(every));
+            // SAFETY: LLVM's profiling runtime, linked by -Cprofile-generate.
+            unsafe { __llvm_profile_write_file() };
+        }
+    });
+}
+
 fn main() -> Result<()> {
     victory_core::logging::init("info");
+    #[cfg(feature = "pgo")]
+    pgo_dumps();
     // The audio recorder `run` starts for `VICTORY_AUDIO_CAPTURE`.
     #[cfg(all(windows, feature = "diagnostics"))]
     if victory_hle::modules::audio::capture::child() {

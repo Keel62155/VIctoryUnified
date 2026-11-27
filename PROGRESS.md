@@ -38,10 +38,86 @@ tied to `VICTORY_RELAY=2` / `VICTORY_CARD_STEPS=2` (gone with the safe settings,
 | Neptune's CPU switch set | Neptune play.ps1 | crashed |
 | `fast` build profile (fat LTO, 1 codegen unit, `-Ctarget-cpu=native`) | measured here | 60.2 -> 55.9 |
 | `VICTORY_E5_TARGETS=r11g11b10` (R9G9B9E5 targets as 32-bit R11G11B10_FLOAT) | "willy" cool_fox build / Neptune-VE | 60.2 -> 51.2, no banding |
+| `VICTORY_TEXBACK_ASYNC` (texture read-backs on their own thread) | victory-nvidia-megafork | cell 51.3 -> 50.2 (none there); **off by default**: at half scale (3 read-backs of 350 KB a frame) rooms went purple and blotchy, black boxes on hair |
+| pipeline build panic completes the job | fxceless #1353 via victory-nvidia-megafork | no speed effect (recovery only) |
+| `VICTORY_RENDER_SCALE=0.5` through the FSR DLL | victory-perf patches | 43.5, but the picture is black |
+| `VICTORY_RENDER_SCALE=0.5 VICTORY_OWN_UPSCALER=1` | VIctory-NVIDIA / megafork launch set | cell 51.3 -> 45.2 (22 fps), picture right, softer; the card still 84-95 % busy |
+| plus `VICTORY_BVH_MISS=1` | VIctory-NVIDIA | 50.3, card 74 % busy, hazier light: not taken |
+| own upscaler at half scale, on the route | | rooms turn purple in the common room and the picture smears on camera turns: **not shipped** |
+| `VICTORY_RENDER_SCALE=0.5` through the FSR DLL, FSR's maximum left alone (now the default of the patch) | measured here | picture right; card 69 % busy; 51-58 ms in the cell: **the CPU now sets the frame time** |
+| compares and rehashes batched per copy (`VICTORY_CARD_BATCH`, tried) | measured here | 53.5 -> 54.2 ms, no gain: 400 compared ranges a frame are 400 different copies, and the rehash list's time is its uploads; reverted |
+
+### The scarlett-fox branch (victory-scarlett-3070, cool_fox f4b48ad + Scarlett), merged
+
+Merged on branch `scarlett-merge` (three-way from e12c29f; our translator, cache key, E5 switch
+and icon kept; its translator-only features answered "absent" in `shader_compat.rs`). Same
+translations (25,782 shaders), same draws a frame (4,350-4,420) and the same draws dropped
+for want of a host pipeline (250-300 a frame, as on master). Cell, half scale, warm caches,
+frame times from 160 s, three alternating pairs: master 24.1 fps median (23.7 mean), merge
+24.7 (24.2): about 2.5 % faster, 400 MB less RAM. Its launcher's nine performance switches
+together (TABLE_MEMO, MAP_LOCK_FINE, PARTIAL/BAKE_DELTA, POOL_DISCARD, FILL_TITLE, POOL_CAP,
+LIST_ALIAS_EXACT, LIST_HOLD): 21.6 median, no better. Its own large gains were against
+cool_fox with `VICTORY_LEVELS_ON_DEMAND=1`, which was already off here. Not adopted as the
+base; the branch is kept.
+
+### Where the wall is now (2026-11-26 night)
+
+Cell, half scale, warm: 24-25 fps steady. `VICTORY_THIN_THREADS=4` 24.7 / 24.8 against 6's 24.6
+(no change). `VICTORY_RENDER_SCALE=0.4` (FSR) 23.5: no faster than 0.5, the card drops to
+82 % busy and CPU preparation rises to 35 ms. Below half scale the submitting thread is the
+limit. Its samples (kitty6-prof with the PDB, 40 s, busy 78 %): `GetWriteWatch` 11 %
+(`watch::kernel_written` <- `ask_run` <- `ask_ahead`), a wait in a descriptor guard's drop 8 %
+(the heap-sync thread mirroring the title's descriptor records, about 15 ms a frame of its
+own), `shadow::wide` 20 % inclusive (fanning copies out and waiting for them), a `Vec::retain`
+in `card_before` 5 %. These are the next targets for real gains past 25 fps.
+
+### Profile-guided optimization (2026-11-26 night)
+
+`cf-bench\pgo.ps1`: instrumented build (`--features pgo`, profile written every 15 s), trained
+on the walking route (330 s, 17 profiles, 20 MB), merged, rebuilt with `-Cprofile-use`. Cell,
+half scale, warm caches, two pairs, steady state: plain 24.4 / 24.1 fps median, PGO 23.4 /
+24.1. No gain while the card is 84-91 % busy; not adopted (the pipeline is kept).
+
+### Profiles (2026-11-26)
+
+- Card stamps per pass (`VICTORY_CARD_SPANS=1`, now in release builds), cell, full quality: 16
+  submissions in 39 `ExecuteCommandLists` calls a frame; the card works about 46 ms: 42 on the
+  title's lists, about 4 on our compares (with the tail of the title's work), 3.4 on our
+  rehash lists (with uploads); idle between submissions 7-10 ms.
+- Frame times (`VICTORY_FRAME_TIMES`), full quality on the 420 s route: median 19.3 fps but 1 %
+  lows 4.7 fps, 267 frames over 100 ms; frames spread 40-110 ms in the corridors (mean 65 ms),
+  not single spikes.
+- CPU samples (Kitty6's `kitty6-prof`, built from source), half scale through FSR: the
+  submitting thread runs 80 % of the time, about a quarter of its samples in the Windows heap
+  (allocate, free, its lock) and 7 % in `GetWriteWatch`; the list threads run 36 % and wait
+  for work the rest.
 
 Where the time goes (default settings, cell): about 40 ms a frame of CPU preparation, of
 it about 20 ms copying 40 MB of shader results back to title memory and 8 ms uploading
 56 MB; the card is 87-92 % busy. The submitting thread works 41-42 ms a frame.
+
+With all of the above together (the installed release, `START.bat` defaults): 51.3 ms
+(19.5 fps) in the cell, picture correct. The card's clock line then says it is about 97 %
+busy, and the copy-back thread waits 25.8 ms a frame for it: the card, not the CPU, now
+sets the frame time in the cell.
+
+## victory-nvidia-megafork (rorodev6), compared file by file
+
+It is trustno1-coder's VIctory-NVIDIA (6a31e431) plus four things; against cool_fox about
+60 files differ. By the areas looked for:
+
+| Area | megafork | cool_fox / here |
+|---|---|---|
+| Copy-back | compares on the card from 1 MiB (`CARD_BUFFERS_MIN_MB=1`) | from 64 KiB (`CARD_BUFFERS_MIN_KB=64`), landing on 4 threads: already finer |
+| CPU submission | per-draw table walk, heaps set per change | precomputed table plans, cached heap binding, per-host sweeps, async submit, thin lists: ahead |
+| Texture read-backs | written by a thread of their own (`VICTORY_TEXBACK_ASYNC`) | **new: ported** |
+| Zero-copy | none beyond VIctory | `WINDOWS_BAR_MB`, `LAND_BESIDE` |
+| Descriptors | dynamic slots up to half a capped (NVIDIA) heap; `FAIR_DUE` re-check order | 2^18 on a capped heap; no table refused in our runs (no "no free dynamic descriptor slots" line), so not taken |
+| NVIDIA shaders | halves (fxceless #927), `NAN_SCRUB`, `CONSTANT_MARKS`, `TARGET_VARIANTS` | paired lanes, local waves: correctness items, kept for the rendering pass |
+| VRAM | VIctory's pools | cool_fox's `residency.rs`, pool growth back-off: ahead |
+| Async GPU | blocking fence waits not implemented | `WaitOnAddress` fence waits: ahead |
+| Compiler | release profile only | `fast` profile (fat LTO, native CPU): ahead |
+| Other | pipeline panic recovery (fxceless #1353), mouse input, adapter choice, Windows 10 Agility SDK, intro video flicker fix | panic recovery **ported**; the rest not needed here |
 
 Looked at and not taken: Dolberthi's persistent worker pool (cool_fox spawns threads only
 for copies of 32 MB and more, where the spawn is about 1 % of the copy); his smart

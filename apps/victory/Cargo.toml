@@ -19,8 +19,13 @@ blake3.workspace = true
 memchr.workspace = true
 clap.workspace = true
 walkdir.workspace = true
+mimalloc = { version = "0.1.52", default-features = false, optional = true }
 
 [features]
+default = ["mimalloc"]
+# mimalloc (MIT) as the global allocator instead of the Windows heap: the submitting thread spent
+# about a quarter of its samples in the Windows heap (its lock shared by some 30 busy threads).
+mimalloc = ["dep:mimalloc"]
 # Debug-level logs and the debugging switches (frame capture, stack dumps,
 # the host debug layer, scripted keys). Off in a plain release build.
 diagnostics = [
@@ -29,6 +34,9 @@ diagnostics = [
     "victory-loader/diagnostics",
     "victory-shader/diagnostics",
 ]
+# Only for a build with `-Cprofile-generate` (profile-guided optimization): writes the profile
+# every `VICTORY_PGO_DUMP_SECS` seconds (default 20), as the game is ended without a clean exit.
+pgo = []
 
 [lints]
 workspace = true

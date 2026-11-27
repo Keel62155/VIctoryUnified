@@ -446,7 +446,21 @@ fn does_of(written: &[(usize, usize)], runs: &[&HostList]) -> (Vec<Does>, Vec<(u
                     to: at.saturating_add(len),
                     asked: touches(written, at, at.saturating_add(len)),
                 },
-                &Step::Host(_, (from, to)) if from < to => Does::Read { from, to, asked: false },
+                // Host work runs on the CPU at submission: it cannot be done on the card, so
+                // what it reads of flights' writes stops the plan (`VICTORY_HOST_READ_WAIT`;
+                // was `asked: false`, and `expand_rects` read vertices still being written).
+                &Step::Host(_, (from, to)) if from < to => Does::Read {
+                    from,
+                    to,
+                    asked: {
+                        let asked = host_read_wait() && touches(written, from, to);
+                        HOST_READS[0].fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        if asked {
+                            HOST_READS[2].fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        }
+                        asked
+                    },
+                },
                 Step::Refresh(shadow, at, len) => Does::Refresh {
                     shadow: Arc::as_ptr(shadow) as usize,
                     from: *at,
@@ -1135,6 +1149,36 @@ mod tests {
         assert!(plan(&[copy(1000, 1050, 100, true)], 2, true, &mut None).is_err());
         assert!(plan(&[taken], 1, true, &mut None).is_err());
         assert!(plan(&[fill(1000, 4, true), copy(1000, 5000, 100, false)], 1, true, &mut None).is_err());
+    }
+
+    /// Host work that reads title memory (`defer_host_read`, as `expand_rects` does with
+    /// the title's vertices) under a flight's write: the card steps' plan does not take the
+    /// submission (it cannot do CPU work on the card) and the wait check names it, so the
+    /// submission waits for the flight; outside the write, neither stops it.
+    #[test]
+    fn host_work_reading_what_a_flight_writes_waits() {
+        let Some(host) = host() else {
+            return; // no host GPU
+        };
+        let written = [(0x2000usize, 0x3000usize)];
+        let under = host.new_list().unwrap();
+        under.defer_host_read(0x2800, 0x200, || {});
+        let apart = host.new_list().unwrap();
+        apart.defer_host_read(0x4000, 0x100, || {});
+        let before = HOST_READS.each_ref().map(|c| c.load(Ordering::Relaxed));
+
+        let (does, _) = does_of(&written, &[&under]);
+        assert_eq!(does, [Does::Read { from: 0x2800, to: 0x2a00, asked: true }]);
+        assert!(plan(&does, 2, true, &mut None).is_err(), "the card steps take CPU work under a flight's write");
+        assert_eq!(blocked_by(&written, &[&under], false), Some(WHY_READ));
+
+        let (does, _) = does_of(&written, &[&apart]);
+        assert_eq!(does, [Does::Read { from: 0x4000, to: 0x4100, asked: false }]);
+        assert!(plan(&does, 2, true, &mut None).is_ok());
+        assert_eq!(blocked_by(&written, &[&apart], false), None);
+
+        let after = HOST_READS.each_ref().map(|c| c.load(Ordering::Relaxed));
+        assert!(after[0] >= before[0] + 2 && after[1] > before[1] && after[2] > before[2]);
     }
 
     #[test]

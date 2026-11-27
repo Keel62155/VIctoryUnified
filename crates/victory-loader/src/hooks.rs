@@ -135,6 +135,12 @@ fn render_scale_patches(base: usize, scale: f32, fsr: bool) -> Vec<OwnedPatch> {
                 expect: vec![0xC5, 0xFA, 0x10, 0x05, 0xA2, 0xE2, 0x86, 0x03],
                 new,
             });
+            // FSR's maximum render size is left as it is unless `VICTORY_FSR_MAX_PATCH=1`: with
+            // the PC FSR DLL (`VICTORY_FSR_DLL`) and the maximum made the scaled size, the
+            // picture was black at 0.5 (RTX 4060); without it, right.
+            if std::env::var_os("VICTORY_FSR_MAX_PATCH").is_none_or(|v| v != "1") {
+                return patches;
+            }
             patches.push(OwnedPatch {
                 what: "render scale: FSR maximum = scaled size",
                 rva: 0x6300ba8,
@@ -240,12 +246,13 @@ mod tests {
     #[test]
     fn half_scale_patches_both_upscalers() {
         let base = 0x7ff0_0000_0000;
+        // FSR's maximum is left alone unless VICTORY_FSR_MAX_PATCH=1 (this test runs without
+        // it): the own upscaler's two patches and FSR's scale.
         let p = render_scale_patches(base, 0.5, true);
-        assert_eq!(p.len(), 4);
+        assert_eq!(p.len(), 3);
         assert_eq!(p[0].new, 0.5f32.to_le_bytes());
         // The FSR load now reads 0.5 at 0x5fc6edc: disp from the next instruction.
         assert_eq!(p[2].new, [0xC5, 0xFA, 0x10, 0x05, 0x22, 0x78, 0x6D, 0x03]);
-        assert_eq!(p[3].new, ((base + 0x28ef680) as u64).to_le_bytes());
         assert!(p.iter().all(|p| p.new.len() == p.expect.len()));
     }
 

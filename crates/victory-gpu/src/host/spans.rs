@@ -16,17 +16,23 @@ use super::Host;
 /// Submissions stamped before the first stamps are read and used again.
 const SPANS: usize = 512;
 
-/// The stamps of one queue's submissions.
+/// A ring of stamp lists, `per` to a slot: each list holds one timestamp
+/// and its way into memory the PC reads.
 pub(super) struct Spans {
     _allocator: ID3D12CommandAllocator,
     _heap: ID3D12QueryHeap,
     _back: ID3D12Resource,
-    /// The mapped results, two a submission.
+    /// The mapped results, `per` a slot.
     data: usize,
     lists: Vec<ID3D12CommandList>,
+    per: usize,
     ticks_per_ms: f64,
     next: usize,
     sums: Sums,
+    /// Ticks between the stamp in front of our compare list and the end
+    /// (submissions), and how many submissions had one.
+    compare: u64,
+    compares: u64,
 }
 
 // SAFETY: free-threaded objects and a mapping only read behind a lock.
@@ -69,61 +75,97 @@ fn on() -> bool {
     *ON.get_or_init(|| std::env::var_os("VICTORY_CARD_SPANS").is_some_and(|v| v == "1"))
 }
 
+/// Submissions: three stamps each (start, in front of our compare list, end).
 static SPANS_MADE: Mutex<Option<Option<Spans>>> = Mutex::new(None);
+/// Our rehash lists, sent on their own ahead of a submission: two stamps each.
+static SYNC_MADE: Mutex<Option<Option<Spans>>> = Mutex::new(None);
+
+/// `ExecuteCommandLists` calls on the drawing queue since the last frame-rate
+/// line (submissions' parts and our rehash lists).
+pub(crate) static CALLS: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+
+/// The stamp lists of a submission: in front of it, in front of our compare
+/// list (or of the end, without one), behind it.
+pub(super) struct SpanSet {
+    pub(super) front: ID3D12CommandList,
+    pub(super) mid: ID3D12CommandList,
+    pub(super) behind: ID3D12CommandList,
+}
+
+impl Spans {
+    /// The next slot's lists, after adding up what the card wrote into the
+    /// slot the last time round (long done: [`SPANS`] slots ago).
+    fn take(&mut self) -> &[ID3D12CommandList] {
+        let i = self.next;
+        self.next = (i + 1) % SPANS;
+        let mut read = [0u64; 3];
+        // SAFETY: inside the mapping; written by the card at whole words.
+        unsafe {
+            let at = (self.data as *mut u64).add(self.per * i);
+            for (k, r) in read.iter_mut().enumerate().take(self.per) {
+                *r = at.add(k).read_volatile();
+                at.add(k).write_volatile(0);
+            }
+        }
+        let (start, end) = (read[0], read[self.per - 1]);
+        self.sums.add(start, end);
+        if self.per == 3 && start != 0 && read[1] >= start && end >= read[1] {
+            self.compare += end - read[1];
+            self.compares += u64::from(end > read[1]);
+        }
+        &self.lists[self.per * i..self.per * (i + 1)]
+    }
+}
 
 impl Host {
-    /// The lists that go in front of and behind a submission about to be
-    /// sent to the drawing queue, if stamps are asked for.
-    pub(super) fn span_lists(&self) -> Option<[ID3D12CommandList; 2]> {
+    /// The stamp lists for a submission about to be sent to the drawing
+    /// queue, if stamps are asked for.
+    pub(super) fn span_lists(&self) -> Option<SpanSet> {
         if !on() {
             return None;
         }
         let mut made = SPANS_MADE.lock().unwrap_or_else(|e| e.into_inner());
         let spans = made
             .get_or_insert_with(|| {
-                self.make_spans()
+                self.make_spans(3)
                     .inspect_err(|e| tracing::warn!(error = %e, "no stamps around submissions"))
                     .ok()
             })
             .as_mut()?;
-        let i = spans.next;
-        spans.next = (i + 1) % SPANS;
-        // The stamps of the submission that had these lists, that many
-        // submissions ago: long done.
-        // SAFETY: inside the mapping; written by the card at whole words.
-        let (start, end) = unsafe {
-            let at = (spans.data as *mut u64).add(2 * i);
-            let read = (at.read_volatile(), at.add(1).read_volatile());
-            at.write_volatile(0);
-            at.add(1).write_volatile(0);
-            read
-        };
-        spans.sums.add(start, end);
-        Some([spans.lists[2 * i].clone(), spans.lists[2 * i + 1].clone()])
+        let l = spans.take();
+        Some(SpanSet { front: l[0].clone(), mid: l[1].clone(), behind: l[2].clone() })
     }
 
-    fn make_spans(&self) -> windows::core::Result<Spans> {
+    /// The stamp lists in front of and behind one of our rehash lists.
+    pub(super) fn sync_span_lists(&self) -> Option<[ID3D12CommandList; 2]> {
+        if !on() {
+            return None;
+        }
+        let mut made = SYNC_MADE.lock().unwrap_or_else(|e| e.into_inner());
+        let spans = made.get_or_insert_with(|| self.make_spans(2).ok()).as_mut()?;
+        let l = spans.take();
+        Some([l[0].clone(), l[1].clone()])
+    }
+
+    fn make_spans(&self, per: usize) -> windows::core::Result<Spans> {
         let device = &self.device;
+        let count = per * SPANS;
         // SAFETY: plain object creation; lists of one allocator recorded one
         // after the other.
         unsafe {
             let mut heap: Option<ID3D12QueryHeap> = None;
             device.CreateQueryHeap(
-                &D3D12_QUERY_HEAP_DESC {
-                    Type: D3D12_QUERY_HEAP_TYPE_TIMESTAMP,
-                    Count: 2 * SPANS as u32,
-                    NodeMask: 0,
-                },
+                &D3D12_QUERY_HEAP_DESC { Type: D3D12_QUERY_HEAP_TYPE_TIMESTAMP, Count: count as u32, NodeMask: 0 },
                 &mut heap,
             )?;
             let heap = heap.ok_or_else(windows::core::Error::empty)?;
-            let back = self.read_back_buffer(16 * SPANS as u64).ok_or_else(windows::core::Error::empty)?;
+            let back = self.read_back_buffer(8 * count as u64).ok_or_else(windows::core::Error::empty)?;
             let mut data = std::ptr::null_mut();
             back.Map(0, None, Some(&mut data))?;
-            std::ptr::write_bytes(data.cast::<u8>(), 0, 16 * SPANS);
+            std::ptr::write_bytes(data.cast::<u8>(), 0, 8 * count);
             let allocator: ID3D12CommandAllocator = device.CreateCommandAllocator(D3D12_COMMAND_LIST_TYPE_DIRECT)?;
-            let mut lists = Vec::with_capacity(2 * SPANS);
-            for i in 0..2 * SPANS as u32 {
+            let mut lists = Vec::with_capacity(count);
+            for i in 0..count as u32 {
                 let list: ID3D12GraphicsCommandList =
                     device.CreateCommandList(0, D3D12_COMMAND_LIST_TYPE_DIRECT, &allocator, None)?;
                 list.EndQuery(&heap, D3D12_QUERY_TYPE_TIMESTAMP, i);
@@ -137,9 +179,12 @@ impl Host {
                 _back: back,
                 data: data as usize,
                 lists,
+                per,
                 ticks_per_ms: self.queue.GetTimestampFrequency()? as f64 / 1000.0,
                 next: 0,
                 sums: Sums::default(),
+                compare: 0,
+                compares: 0,
             })
         }
     }
@@ -194,19 +239,38 @@ pub(super) fn line(frames: f64) {
         }
         (s.0, s.1) = (0, 0);
     }
+    let calls = CALLS.swap(0, std::sync::atomic::Ordering::Relaxed) as f64 / frames;
     let mut made = SPANS_MADE.lock().unwrap_or_else(|e| e.into_inner());
     let Some(Some(spans)) = made.as_mut() else {
         return;
     };
     let last = spans.sums.last;
     let s = std::mem::replace(&mut spans.sums, Sums { last, ..Sums::default() });
-    let ms = |ticks: u64| ticks as f64 / spans.ticks_per_ms / frames;
+    let (compare, compares) = (std::mem::take(&mut spans.compare), std::mem::take(&mut spans.compares));
+    let per_ms = spans.ticks_per_ms;
+    let ms = |ticks: u64| ticks as f64 / per_ms / frames;
+    let (sync_n, sync_ms) = {
+        let mut sync = SYNC_MADE.lock().unwrap_or_else(|e| e.into_inner());
+        match sync.as_mut() {
+            Some(Some(y)) => {
+                let last = y.sums.last;
+                let t = std::mem::replace(&mut y.sums, Sums { last, ..Sums::default() });
+                (t.count as f64 / frames, ms(t.busy))
+            }
+            _ => (0.0, 0.0),
+        }
+    };
     tracing::info!(
-        "the card's own stamps per frame: {:.1} submissions, working {:.1} ms, idle between them {:.1} ms, the longest {:.1} ms",
+        "the card's own stamps per frame: {:.1} submissions in {calls:.1} ExecuteCommandLists calls, working {:.1} ms \
+         (the title's lists {:.1} ms, our compares behind them {:.1} ms in {:.1}), idle between them {:.1} ms, the longest \
+         {:.1} ms; our rehash lists sent ahead: {sync_n:.1}, {sync_ms:.2} ms",
         s.count as f64 / frames,
         ms(s.busy),
+        ms(s.busy.saturating_sub(compare)),
+        ms(compare),
+        compares as f64 / frames,
         ms(s.between),
-        s.longest as f64 / spans.ticks_per_ms
+        s.longest as f64 / per_ms
     );
 }
 

@@ -69,6 +69,10 @@ rem 6 threads translating draw calls (8 by default): fewer leave the fast cores 
 rem thread (cell: 8 -> 60.2 ms, 6 -> 50.2, 12 -> 63.1, 16 -> 71.5 on an i7-14700F).
 if not defined VICTORY_THIN_THREADS set "VICTORY_THIN_THREADS=6"
 
+rem The 3D world at half width and height (960x540), upscaled to 1080p by FSR as the default 2/3 is:
+rem steady 22-24 fps in the prologue's cell against about 19.5. VICTORY_QUALITY=1 keeps the 2/3.
+if not defined VICTORY_QUALITY if not defined VICTORY_RENDER_SCALE set "VICTORY_RENDER_SCALE=0.5"
+
 rem Series S upscaling through AMD's PC FSR DLL (from a PC game you own; not included).
 if not defined VICTORY_FSR_DLL if exist "%root%\fsr\amd_fidelityfx_upscaler_dx12.dll" set "VICTORY_FSR_DLL=%root%\fsr\amd_fidelityfx_upscaler_dx12.dll"
 if not defined VICTORY_FSR_DLL echo WARNING: no FSR DLL (VICTORY_FSR_DLL or fsr\amd_fidelityfx_upscaler_dx12.dll): on NVIDIA the picture may stay black. 1>&2

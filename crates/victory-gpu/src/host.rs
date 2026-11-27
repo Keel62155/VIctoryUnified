@@ -2949,6 +2949,19 @@ fn copy_blocked(written: &[(usize, usize)], dst: usize, src: usize, len: usize) 
     (read || touches(written, dst, dst + len)).then_some(read)
 }
 
+/// Whether [`blocked_by`] waits for flights that may write what host work reads
+/// (`HostList::defer_host_read`, c75cb22); `VICTORY_HOST_READ_WAIT=0` turns it off, for
+/// comparing.
+fn host_read_wait() -> bool {
+    static ON: OnceLock<bool> = OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("VICTORY_HOST_READ_WAIT").is_none_or(|v| v != "0"))
+}
+
+/// Since the start: host-work reads of title memory the card steps' plan looked at, those
+/// [`blocked_by`] found under flights' writes (a wait), and those the card steps' plan found
+/// so (the card does not take the submission; it waits). Logged with the late line.
+static HOST_READS: [std::sync::atomic::AtomicU64; 3] = [const { std::sync::atomic::AtomicU64::new(0) }; 3];
+
 /// [`late_blocked`] against `written`, the title memory flights' shaders
 /// may write (in order, joined); `count` whether the kind of read is
 /// counted for the frame line.
@@ -3019,6 +3032,19 @@ fn blocked_by(written: &[(usize, usize)], runs: &[&HostList], count: bool) -> Op
                         return Some(WHY_READ);
                     }
                 },
+                // (From fxceless/victory-fork c75cb22, AscilCH) Host work that reads title
+                // memory (`HostList::defer_host_read`: `expand_rects` reads the title's
+                // vertices at submission) waits for flights whose shaders may write it, as
+                // the card steps' plan already does (`Does::Read`).
+                &Step::Host(_, (from, to)) if from < to && host_read_wait() && touches(written, from, to) => {
+                    HOST_READS[1].fetch_add(1, Ordering::Relaxed);
+                    if count {
+                        LATE_STATS[16].fetch_add(1, Ordering::Relaxed);
+                        #[cfg(feature = "diagnostics")]
+                        blame("host work reading title memory", written, from, to - from);
+                    }
+                    return Some(WHY_READ);
+                }
                 Step::Refresh(..) | Step::GpuWrite(..) | Step::Host(..) => {}
             }
         }
@@ -3575,6 +3601,12 @@ fn late_line(frames: f64) {
         return;
     }
     let s: Vec<f64> = LATE_STATS.iter().map(|s| s.swap(0, Ordering::Relaxed) as f64 / frames).collect();
+    let [seen, waited, refused] = [0, 1, 2].map(|i| HOST_READS[i].load(Ordering::Relaxed));
+    tracing::info!(
+        "host work reading title memory, since the start (VICTORY_HOST_READ_WAIT={}): {seen} looked at by the card \
+         steps' plan, {waited} found under flights' writes by the wait check, {refused} by the card steps' plan",
+        u8::from(host_read_wait())
+    );
     tracing::info!(
         "submissions sent ahead per frame: {:.1} in {:.1} settles ({:.1} flights each time), {:.1} ms waiting for the card in them; \
          settled for: a synchronous submission or present {:.1}, the card had run them {:.1}, a wait for a memory value {:.1}, \
@@ -3687,7 +3719,6 @@ mod panel;
 mod place;
 mod send;
 pub(crate) use send::{goes_as_words, words_under};
-#[cfg(feature = "diagnostics")]
 pub(crate) mod spans;
 mod torn;
 #[cfg(feature = "diagnostics")]
@@ -3845,12 +3876,18 @@ pub(crate) fn walls_trace() -> bool {
 /// without it, so the title read a buffer nobody wrote, as before read-backs
 /// were made (the exposure metering's two small float targets, every frame).
 fn read_backs(list: &HostList) {
+    use crate::land::{count, spent, stat};
+    let started = std::time::Instant::now();
     // Textures shaders wrote that the title reads on the CPU
     // ([`crate::texback`]).
     for back in &list.deferred().texture_backs {
         crate::texback::land(back);
+        count(stat::RB_TEXTURE_COUNT, 1);
     }
+    let textures_done = spent(stat::RB_TEXTURES, started);
     for (buffer, at, [row, rows, pitch]) in &list.deferred().backs {
+        count(stat::RB_BUFFER_COUNT, 1);
+        count(stat::RB_BUFFER_BYTES, (*row * *rows) as u64);
         let mut data = std::ptr::null_mut();
         // SAFETY: a read-back buffer of ours, written by the list that has
         // run; the title's destination holds every row (checked when the
@@ -3878,6 +3915,7 @@ fn read_backs(list: &HostList) {
             }
         }
     }
+    spent(stat::RB_BUFFERS, textures_done);
 }
 
 /// After the card ran what declared `back`: what shaders wrote there goes
@@ -4386,6 +4424,11 @@ impl Host {
                         }
                     }
                     list.Close()?;
+                    spans::CALLS.fetch_add(1, Ordering::Relaxed);
+                    if let Some([front, behind]) = self.sync_span_lists() {
+                        self.queue.ExecuteCommandLists(&[Some(front), Some(list.cast()?), Some(behind)]);
+                        return Ok(());
+                    }
                     self.queue.ExecuteCommandLists(&[Some(list.cast()?)]);
                     Ok(())
                 })()
@@ -4753,6 +4796,7 @@ impl Host {
                 // far are ahead of this fetch, every later one behind it.
                 let order = QUEUE_ORDER.lock().unwrap_or_else(|e| e.into_inner());
                 self.queue.ExecuteCommandLists(&lists);
+                spans::CALLS.fetch_add(1, Ordering::Relaxed);
                 let after = *order;
                 drop(order);
                 self.card_sent();
@@ -4917,6 +4961,7 @@ impl Host {
                     for &i in &flight.order {
                         read_backs(flight.lists[i].host());
                     }
+                    let done_from = std::time::Instant::now();
                     if let Some(card) = flight.card {
                         self.card_done(card);
                     }
@@ -4926,6 +4971,7 @@ impl Host {
                     for detached in &mut flight.lists {
                         detached.release_tables();
                     }
+                    crate::land::spent(crate::land::stat::RB_DONE, done_from);
                     landed.push((flight.lists, flight.order));
                     crate::land::spent(crate::land::stat::READ_BACKS, telling)
                 }
@@ -5047,6 +5093,7 @@ impl Host {
                     }
                     list.Close()?;
                     self.queue.ExecuteCommandLists(&[Some(list.cast()?)]);
+                    spans::CALLS.fetch_add(1, Ordering::Relaxed);
                     self.card_sent();
                     *submitted += 1;
                     self.queue.Signal(&self.fence, *submitted)?;
@@ -5703,10 +5750,17 @@ impl Host {
         let sending = crate::timeline::ticks();
         if late {
             *submitted += 1;
-            #[cfg(feature = "diagnostics")]
-            if let Some([front, behind]) = self.span_lists() {
-                lists.insert(0, Some(front));
-                lists.push(Some(behind));
+            if let Some(set) = self.span_lists() {
+                // The middle stamp goes in front of our compare list, if the
+                // submission has one, else in front of the end.
+                let check = card.as_ref().and_then(|c| c.check.as_ref());
+                let mid_at = check
+                    .and_then(|c| lists.iter().position(|l| l.as_ref() == Some(c)))
+                    .unwrap_or(lists.len());
+                lists.insert(mid_at, Some(set.mid));
+                firsts.iter_mut().filter(|first| **first > mid_at).for_each(|first| *first += 1);
+                lists.insert(0, Some(set.front));
+                lists.push(Some(set.behind));
                 firsts.iter_mut().for_each(|first| *first += 1);
             }
             let cuts: Vec<usize> = parts.iter().filter_map(|&n| firsts.get(n).copied()).collect();
@@ -5715,6 +5769,7 @@ impl Host {
                 let mut from = 0;
                 for to in cuts.into_iter().chain([lists.len()]) {
                     self.queue.ExecuteCommandLists(&lists[from..to]);
+                    spans::CALLS.fetch_add(1, Ordering::Relaxed);
                     from = to;
                 }
                 self.queue.Signal(&self.fence, *submitted)
@@ -5770,6 +5825,7 @@ impl Host {
             // SAFETY: closed lists; the fence and event are ours.
             unsafe {
                 self.queue.ExecuteCommandLists(group);
+                spans::CALLS.fetch_add(1, Ordering::Relaxed);
                 self.card_sent();
                 let waited = self
                     .queue
@@ -8736,7 +8792,6 @@ impl Meter {
         late_line(frames);
         crate::queue::behind_line(frames);
         card_clock_line(frames, ms);
-        #[cfg(feature = "diagnostics")]
         spans::line(frames);
         crate::shadow::back_line(frames);
         #[cfg(feature = "diagnostics")]
@@ -8972,6 +9027,33 @@ impl Meter {
     }
 }
 
+/// Measuring aid (`VICTORY_FRAME_TIMES=<file>`; off by default): one line per frame shown,
+/// the microseconds since the frame before, for 1 % lows and stutter, which the window title's
+/// one-second average hides. Written through a buffer, flushed every 64 frames.
+fn note_frame_time() {
+    use std::io::Write;
+    type Out = Mutex<(std::io::BufWriter<std::fs::File>, std::time::Instant, u32)>;
+    static OUT: OnceLock<Option<Out>> = OnceLock::new();
+    let Some(out) = OUT.get_or_init(|| {
+        let path = std::env::var_os("VICTORY_FRAME_TIMES")?;
+        let file = std::fs::File::create(&path)
+            .inspect_err(|e| tracing::warn!(error = %e, "VICTORY_FRAME_TIMES: the file could not be made"))
+            .ok()?;
+        Some(Mutex::new((std::io::BufWriter::new(file), std::time::Instant::now(), 0)))
+    }) else {
+        return;
+    };
+    let mut out = out.lock().unwrap_or_else(|e| e.into_inner());
+    let (file, last, n) = &mut *out;
+    let now = std::time::Instant::now();
+    let _ = writeln!(file, "{}", now.duration_since(*last).as_micros());
+    *last = now;
+    *n += 1;
+    if *n % 64 == 0 {
+        let _ = file.flush();
+    }
+}
+
 impl Host {
     /// Shows `texture`, which is in `state` (a host state) and stays in it,
     /// as frame `frame` (saved if captures are on). `None` if nothing was
@@ -8990,6 +9072,7 @@ impl Host {
         overlay: Option<(&ID3D12Resource, u32)>,
         frame: u64,
     ) -> Option<bool> {
+        note_frame_time();
         // SAFETY: a live resource.
         let desc = unsafe { texture.GetDesc() };
         let planes = overlay.and_then(|(over, over_state)| {

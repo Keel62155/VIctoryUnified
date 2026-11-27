@@ -62,12 +62,17 @@ const HISTORY: usize = 256;
 const POLL: Duration = Duration::from_millis(8);
 
 /// The keyboard's stand-in gamepad (virtual key, button); README lists it.
-/// Sticks: W/A/S/D left, I/J/K/L right; triggers Z and C.
-const FALLBACK_BUTTONS: [(u8, u32); 14] = [
+/// Sticks: W/A/S/D left, I/J/K/L right; triggers Z and C. Tab is the left
+/// shoulder (held: the weapon wheel) and Shift is A (sprint), as on a PC
+/// keyboard; the view button moved from Tab to M.
+const FALLBACK_BUTTONS: [(u8, u32); 17] = [
     (0x1B, MENU), // Esc
-    (0x09, VIEW), // Tab
-    (0x0D, A),    // Enter
-    (0x08, B),    // Backspace
+    (b'M', VIEW),
+    (0x09, LEFT_SHOULDER), // Tab
+    (0xA0, A),             // left Shift
+    (0xA1, A),             // right Shift
+    (0x0D, A),             // Enter
+    (0x08, B),             // Backspace
     (b'X', X),
     (b'Y', Y),
     (0x26, UP), // arrows
