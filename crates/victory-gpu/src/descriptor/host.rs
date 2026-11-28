@@ -3243,7 +3243,7 @@ impl HostHeap {
         if !order_counted() {
             return;
         }
-        let n = RECORDED.1.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+        let n = RECORDED.1.fetch_add(1, Ordering::Relaxed) + 1;
         RECORDED.0.lock().unwrap_or_else(|e| e.into_inner()).get_or_insert_default().insert((std::ptr::from_ref(self) as usize, index), (n, for_draw));
     }
 

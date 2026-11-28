@@ -1,33 +1,4 @@
-# VIctoryUnified progress
-
-## v2.0 source release
-
-The source package carries the graphical launcher, three presets, automatic dependency setup and
-six-worker shader warming. The verification scope is the Windows release build, existing tests,
-Clippy and the launcher CLI smoke test. The measurements below are historical and describe their
-original builds and settings. Gameplay, visual correctness and live dependency downloads have no
-new end-to-end verification for this package.
-
-The native Streamline path handles D3D12 swap chain integration, frame input tagging and generated
-presents. It is experimental and off by default. FSR remains the upscaler with native DLSS Frame
-Generation selected. The menu/video interval and the generated presentation rate are independent of
-the game's rendered frame rate.
-
-These ports require explicit opt-in with a value of 1:
-
-| Switch | Behavior |
-| --- | --- |
-| VICTORY_PLACE_APART | Moves list workers onto available efficiency cores |
-| VICTORY_PLACE_LANE | Moves submission preparation onto available performance cores |
-| VICTORY_SUBMIT_SPLIT | Separates submission preparation from queue submission with the required relay mode |
-| VICTORY_OFF_LINE | Moves additional work off the preparation thread with split submission enabled |
-| VICTORY_REFLEX_SLEEP | Enables Reflex sleep on the presentation thread when Streamline is active |
-
-The public source package uses the GPL-compatible v1.1 loader implementation for instruction
-emulation and write-site helpers. The XCL-derived decoder and handler from the working tree are excluded.
-
-## Earlier development
-
+# cool_fox on an RTX 4060 8 GB: progress
 
 PC: Intel i7-14700F (8 P + 12 E cores, 28 threads), RTX 4060 8 GB, 32 GB RAM, Windows 11,
 Resizable BAR on (since 2026-11-26). Base: codec_d's cool_fox (commit e12c29f).
@@ -76,7 +47,7 @@ tied to `VICTORY_RELAY=2` / `VICTORY_CARD_STEPS=2` (gone with the safe settings,
 | `VICTORY_RENDER_SCALE=0.5` through the FSR DLL, FSR's maximum left alone (now the default of the patch) | measured here | picture right; card 69 % busy; 51-58 ms in the cell: **the CPU now sets the frame time** |
 | compares and rehashes batched per copy (`VICTORY_CARD_BATCH`, tried) | measured here | 53.5 -> 54.2 ms, no gain: 400 compared ranges a frame are 400 different copies, and the rehash list's time is its uploads; reverted |
 
-### 2026-11-27: the submitting thread, other forks, Agility SDK, menu/video timing (VIctoryUnified v1.1)
+### 2026-11-27: the submitting thread, other forks, Agility SDK, 60 fps (VIctoryUnified v1.1)
 
 Measured with the walk-free cell runs (half scale through FSR, 200 s, frame times from 160 s,
 "steady") on one build; identical settings spread about +-5 % between runs, so one run says little
@@ -174,3 +145,21 @@ Looked at and not taken: Dolberthi's persistent worker pool (cool_fox spawns thr
 for copies of 32 MB and more, where the spawn is about 1 % of the copy); his smart
 copy-back (cool_fox's card-side compare already fetches only changed pieces; skipping the
 rest risks stale data the title reads).
+
+
+## Renderer integration preview
+
+- The runtime now initializes Streamline for standalone native DLSS upscaling as well as native DLSS frame generation. For the supported retail image it selects the FidelityFX dispatch path and applies the input resolution implied by the DLSS mode. The loader verifies the stock image before changing it. Each render mode uses a separate prepared image cache key.
+- The launcher exposes native DLSS upscaling, quality modes, models, and startup frame generation. The preview has a separate local profile. Existing native FSR and OptiScaler paths remain available. The launcher permits compatible cache reuse through an explicit environment override.
+- F1 adds live VSync and conditional live native FG. F3 shows real FPS and native Streamline-reported display throughput separately. The GPU busy number is an estimate. Panel overhead reporting depends on the diagnostics build. Save exchange stays under the preview profile. F4 remains assigned to the opt-in trainer.
+- Native FG can run with the ordered asynchronous submission path without forcing thin lists. The NVIDIA reference uses fresh frame tags and an ordered swap chain. The previous Unified port already shared that foundation. This change avoids relying on per-frame DXGI present counts for native FG reporting.
+- Earlier warmed Unified stationary tests recorded about 15.5 real FPS with native FG versus 18.1 with FG off, and 12.1 versus 13.4 on a later route sample. The captures are not a controlled three-build driving comparison and do not isolate the cause of NVIDIA’s performance difference.
+- The controlled gameplay comparison remains pending. Capture base and displayed FPS separately for the same save, route, render resolution, cache state and preset. Record frame times, 1% lows, PresentMon latency where available, and GPU memory usage. Compare FSR and DLSS with FG off and on before comparing thin and async submission. The 20–25 real FPS driving target and 40–50 displayed FPS target are unverified.
+
+### Preview verification
+
+- Windows x64 release build from locked dependencies, with six build workers.
+- 37 targeted tests passed across the runtime, graphical launcher, F1 menu and F3 panel. The packaged launcher passed its isolated install and CLI smoke check. A synthetic settings file confirmed that external DLSS and FG values override saved settings while unrelated saved values are retained.
+- On an RTX 4060 with NVIDIA Streamline 2.14.16, a synthetic test dispatched DLSS Quality from 1280×720 to 1920×1080 three times. Streamline reported 360 displayed frames from 180 base presents in native 2× mode with status 0. That test uses synthetic color, motion and depth inputs.
+
+- The packaged runtime started the supported title in an isolated profile, presented at 1920×1080, initialized native DLSS and FG, and created the title's 960×540 to 1920×1080 upscaling context. This startup check stopped at the opening screen. Story Mode visuals, the F1 controls in a live game, and the driving performance comparison remain unverified.

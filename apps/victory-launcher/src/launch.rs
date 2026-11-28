@@ -70,6 +70,9 @@ pub fn environment(s: &Settings) -> Vec<(String, String)> {
         set("VICTORY_QUALITY", "1");
     }
     for (k, v) in s.extra() {
+        if ["VICTORY_AUTO_INPUT", "VICTORY_KEYS"].iter().any(|name| k.eq_ignore_ascii_case(name)) {
+            continue;
+        }
         env.push((k, v));
     }
     env
@@ -79,7 +82,7 @@ pub fn environment(s: &Settings) -> Vec<(String, String)> {
 /// Frame Generation through Streamline: OptiScaler stands in for the system's DXGI, which
 /// Streamline's proxies must not meet (FSR upscales then).
 pub fn needs_optiscaler(s: &Settings) -> bool {
-    s.framegen != FrameGen::DlssStreamline
+    s.framegen != FrameGen::DlssStreamline && s.upscaler != Upscaler::DlssNative
         && (s.upscaler == Upscaler::DlssOptiScaler || s.framegen == FrameGen::OptiScaler)
 }
 
@@ -333,26 +336,16 @@ fn runtime(
     overrides: &[(String, String)],
 ) -> Command {
     let mut cmd = Command::new(runtime);
-    for (name, _) in std::env::vars_os() {
-        if name
-            .to_string_lossy()
-            .to_ascii_uppercase()
-            .starts_with("VICTORY_")
-        {
-            cmd.env_remove(name);
-        }
-    }
     let extra = settings.extra();
-    if !extra
+    let bare = std::env::var_os("VICTORY_BARE").is_some_and(|value| !value.is_empty()) || extra
         .iter()
-        .any(|(key, value)| key.eq_ignore_ascii_case("VICTORY_BARE") && !value.is_empty())
-    {
-        cmd.envs(DEFAULTS.iter().copied());
-    }
+        .any(|(key, value)| key.eq_ignore_ascii_case("VICTORY_BARE") && !value.is_empty());
+    let defaults = if bare { &[][..] } else { DEFAULTS };
+    let defaults = defaults.iter().chain(FIXES).chain(&[("VICTORY_FRAME_INTERVAL_MS", "16.667")])
+        .map(|(name, value)| format!("{name}={value}"))
+        .collect::<Vec<_>>().join("\n");
     cmd.current_dir(root)
-        .envs(FIXES.iter().copied())
-        .env("VICTORY_FRAME_INTERVAL_MS", "16.667")
-        .env("VICTORY_RENDER_SCALE", "0.5")
+        .env("VICTORY_LAUNCH_DEFAULTS", defaults)
         .env(
             "VICTORY_FSR_DLL",
             std::env::var_os("VICTORY_FSR_DLL")
@@ -363,18 +356,16 @@ fn runtime(
         .envs(overrides.iter().cloned())
         .env("VICTORY_GAME_DIR", settings.game_dir.trim())
         .env("VICTORY_CACHE_DIR", root.join("cache"))
-        .env("VICTORY_DATA_DIR", root.join("data"))
-        .env_remove("VICTORY_CONFIG")
-        .env_remove("VICTORY_KEYS")
-        .env_remove("VICTORY_AUTO_A")
-        .env_remove("VICTORY_AUTO_INPUT");
-    if !extra
-        .iter()
-        .any(|(key, _)| key.eq_ignore_ascii_case("VICTORY_RENDER_SCALE"))
-        && (settings.scale == Scale::TwoThirds || settings.raytracing)
+        .env("VICTORY_DATA_DIR", root.join("data"));
+    if !extra.iter().any(|(key, _)| key.eq_ignore_ascii_case("VICTORY_RENDER_SCALE"))
+        && settings.scale != Scale::TwoThirds && !settings.raytracing
     {
-        cmd.env_remove("VICTORY_RENDER_SCALE");
+        cmd.env("VICTORY_RENDER_SCALE", "0.5");
     }
+    // The process environment represents explicit switches from an external launcher.
+    cmd.envs(std::env::vars_os().filter(|(name, _)| {
+        name.to_string_lossy().to_ascii_uppercase().starts_with("VICTORY_")
+    }));
     cmd
 }
 
@@ -562,13 +553,32 @@ fn play_inner(root: &Path, s: &Settings, out: &Sender<Event>) -> io::Result<Opti
         );
         prepare_agility(root, s, &exe, out);
     }
-    if s.framegen == FrameGen::DlssStreamline && streamline(root, out) {
-        overrides.push(("VICTORY_FRAMEGEN".into(), "1".into()));
-        overrides.push(("VICTORY_THIN".into(), "1".into()));
-        let _ = out.send(Event::Line(
-            "Requested NVIDIA DLSS Frame Generation (2x). See the run log for driver support."
-                .into(),
-        ));
+    let native_fg = s.framegen == FrameGen::DlssStreamline;
+    let native_dlss = s.upscaler == Upscaler::DlssNative;
+    if (native_fg || native_dlss)
+        && (s.upscaler == Upscaler::DlssOptiScaler || s.framegen == FrameGen::OptiScaler)
+    {
+        return Err(io::Error::other("Choose either native Streamline or OptiScaler for this launch."));
+    }
+    if (native_fg || native_dlss) && streamline(root, out) {
+        if native_dlss {
+            overrides.push(("VICTORY_DLSS".into(), "1".into()));
+            overrides.push(("VICTORY_DLSS_MODE".into(), s.dlss_mode.clone()));
+            overrides.push(("VICTORY_DLSS_PRESET".into(), s.dlss_model.clone()));
+        }
+        if native_fg {
+            // Ordered submission without thin lists. Explicit settings still win.
+            let extras = s.extra();
+            for (name, value) in [("VICTORY_THIN", "0"), ("VICTORY_ASYNC_SUBMIT", "1")] {
+                if !extras.iter().any(|(key, _)| key.eq_ignore_ascii_case(name)) {
+                    overrides.push((name.into(), value.into()));
+                }
+            }
+            overrides.push(("VICTORY_FRAMEGEN".into(), "1".into()));
+            let rate = if s.dlss_fg_at_start { s.dlss_fg_multiplier.clamp(2, 6) } else { 0 };
+            overrides.push(("VICTORY_FRAMEGEN_X".into(), rate.to_string()));
+        }
+        let _ = out.send(Event::Line("Requested native Streamline features. The runtime log reports what the driver enabled.".into()));
     }
 
     let log = log_path(root, "run")?;

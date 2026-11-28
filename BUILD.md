@@ -1,4 +1,4 @@
-# Build VIctoryUnified v2.0
+# Build VIctoryUnified Renderer Preview
 
 ## Prerequisites
 
@@ -9,21 +9,30 @@
 ## Build and verify from a fresh extraction
 
 ```powershell
-cargo build --workspace --locked --release
-cargo test --workspace --locked --release
-cargo clippy --workspace --all-targets --locked --release
-cargo clippy --workspace --all-targets --all-features --locked --release
+cargo build --workspace --locked --release --jobs 6
+cargo test --workspace --locked --release --jobs 6
+cargo clippy --workspace --all-targets --locked --release --jobs 6
+cargo clippy --workspace --all-targets --all-features --locked --release --jobs 6
 cargo xtask policy
 $p = Start-Process .\target\release\VIctoryUnified.exe -ArgumentList '--verify' -Wait -PassThru
 if ($p.ExitCode -ne 0) { throw "Launcher verification failed ($($p.ExitCode))" }
 ```
 
-The workspace builds both executables into `target\release`. The launcher copies the locally built runtime and the setup scripts to `%LOCALAPPDATA%\VIctoryUnified\v2.0`. The verification command checks the installed runtime's CLI without loading a title. Clippy reports warnings, including unfinished GPU hooks preserved in the source. Some existing integration tests use optional title fixtures or graphics capabilities and skip those checks when the inputs are unavailable.
+The workspace builds both executables into `target\release`. The launcher copies the locally built runtime and the setup scripts to `%LOCALAPPDATA%\VIctoryUnified\renderer-preview`. The verification command checks the installed runtime's CLI without loading a title. Clippy reports warnings, including unfinished GPU hooks preserved in the source. Some existing integration tests use optional title fixtures or graphics capabilities and skip those checks when the inputs are unavailable.
+
+For distributable builds, disable release debug info and remap the source root and Cargo home before compiling. Keep PDB files and local runtime data out of the release archive.
+
+```powershell
+$env:CARGO_PROFILE_RELEASE_DEBUG = '0'
+$cargoPath = if ($env:CARGO_HOME) { $env:CARGO_HOME } else { Join-Path $env:USERPROFILE '.cargo' }
+$env:CARGO_ENCODED_RUSTFLAGS = (@("--remap-path-prefix=$((Get-Location).Path)=/victory", "--remap-path-prefix=$cargoPath=/cargo") -join [char]31)
+cargo build --locked --release --jobs 6 -p victory -p victory-launcher
+```
 
 ## Run
 
 You need your own complete game dump, an AVX2-capable CPU, and a D3D12 GPU with shader model 6.6 and mesh shader support. Start `target\release\VIctoryUnified.exe` and pick the game folder. For the batch fallback use `START.bat [game-folder]` or set `VICTORY_GAME_DIR`. Use `START.bat warm` to warm the shader cache with six workers. With a custom Cargo target directory, set `VICTORY_RUNNER` to the built runtime before using the fallback.
 
 - On NVIDIA in Series S mode, supply a compatible AMD PC FidelityFX upscaler DLL. Put it under `fsr\amd_fidelityfx_upscaler_dx12.dll` in the versioned local data directory or set `VICTORY_FSR_DLL` to its absolute path.
-- Optional Microsoft Agility SDK, OptiScaler and NVIDIA Streamline dependencies are set up on first use by the scripts under `tools\`. OptiScaler's DLSS option uses a locally installed NVIDIA upscaling DLL. Streamline fetches the NVIDIA release directly and verifies its hash and signatures. These dependencies are unnecessary for compilation.
+- Optional Microsoft Agility SDK, OptiScaler and NVIDIA Streamline dependencies are set up on first use by the scripts under `tools\`. OptiScaler's DLSS option uses a locally installed NVIDIA upscaling DLL. Streamline fetches the NVIDIA release directly and verifies its hash and signatures. Run the GUI with both executables beside each other. These dependencies are unnecessary for compilation.
 - The five recent experimental engine switches each require a value of `1`. See [PROGRESS.md](PROGRESS.md) for combinations and scope.

@@ -1,5 +1,5 @@
 @echo off
-rem VIctoryUnified v2.0 command-line fallback.
+rem VIctoryUnified renderer preview command-line fallback.
 rem START.bat [game-folder] plays; START.bat warm prepares the shader cache.
 setlocal EnableExtensions DisableDelayedExpansion
 set "here=%~dp0"
@@ -8,8 +8,9 @@ if /i "%~1"=="--help" (
     echo Set VICTORY_GAME_DIR to supply the game folder without a prompt.
     exit /b 0
 )
-set "runtime_home=%LOCALAPPDATA%\VIctoryUnified\v2.0"
+set "runtime_home=%LOCALAPPDATA%\VIctoryUnified\renderer-preview"
 set "runner=%here%target\release\victory.exe"
+if exist "%here%victory.exe" set "runner=%here%victory.exe"
 if defined VICTORY_RUNNER set "runner=%VICTORY_RUNNER%"
 if not exist "%runner%" (
     echo Run cargo build --workspace --locked --release first. 1>&2

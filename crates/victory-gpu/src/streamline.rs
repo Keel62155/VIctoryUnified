@@ -100,8 +100,9 @@ impl Asked {
     pub fn from_env() -> Result<Self, String> {
         let var = |name: &str| std::env::var(name).ok();
         let on = |name: &str| var(name).is_some_and(|v| v.trim() == "1");
-        let framegen = on("VICTORY_FRAMEGEN");
+        let framegen = on("VICTORY_FRAMEGEN") && var("VICTORY_MENU_FG_TYPE").as_deref() != Some("fsr");
         let mode = match var("VICTORY_DLSS_MODE") {
+            Some(name) if name.trim().eq_ignore_ascii_case("off") => Mode::Quality,
             Some(name) => Mode::from_name(&name).ok_or_else(|| {
                 format!("VICTORY_DLSS_MODE={name}: not one of dlaa, quality, balanced, performance, ultraperformance")
             })?,
@@ -110,12 +111,13 @@ impl Asked {
             None => Mode::Quality,
         };
         let preset = match var("VICTORY_DLSS_PRESET") {
+            Some(name) if name.trim().is_empty() => 0,
             Some(name) => plan::preset(&name)
                 .ok_or_else(|| format!("VICTORY_DLSS_PRESET={name}: not one of default, e, f, j, k, l, m"))?,
             None => 0,
         };
         Ok(Asked {
-            dlss: on("VICTORY_DLSS"),
+            dlss: on("VICTORY_DLSS") && var("VICTORY_DLSS_MODE").as_deref() != Some("off"),
             framegen,
             mode,
             preset,
@@ -1503,7 +1505,15 @@ pub(crate) fn present_begins(frame: u64, planes: Planes<'_>) -> Option<Presentin
         }
     }
     let wanted = framegen_wanted();
-    let on = on && wanted != 0;
+    static FOCUSED_ONLY: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    let focused_only = *FOCUSED_ONLY.get_or_init(|| std::env::var_os("VICTORY_FRAMEGEN_FOCUSED_ONLY").is_some_and(|v| v == "1"));
+    let focused = || unsafe {
+        use windows_sys::Win32::UI::WindowsAndMessaging::{GetForegroundWindow, GetWindowThreadProcessId};
+        let mut pid = 0;
+        GetWindowThreadProcessId(GetForegroundWindow(), &mut pid);
+        pid == std::process::id()
+    };
+    let on = on && wanted != 0 && (!focused_only || focused());
     let times = if on { wanted } else { 0 };
     if on != calls.framegen_on || times != calls.framegen_times {
         let mut options = abi::DlssgOptions::new(if on { abi::DLSSG_ON } else { abi::DLSSG_OFF });

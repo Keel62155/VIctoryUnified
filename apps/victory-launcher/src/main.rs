@@ -248,6 +248,7 @@ impl App {
             "Upscaling: {}   Frame generation: {}",
             match self.settings.upscaler {
                 Upscaler::Fsr => "FSR",
+                Upscaler::DlssNative => "DLSS (native Streamline)",
                 Upscaler::DlssOptiScaler => "DLSS (OptiScaler)",
             },
             match self.settings.framegen {
@@ -297,7 +298,7 @@ impl App {
         );
         note(
             ui,
-            "Ships with the build. Measured about 4% faster than DLSS here, so it stays the default.",
+            "Requires a compatible local AMD FidelityFX upscaler DLL.",
         );
         ui.radio_value(
             &mut self.settings.upscaler,
@@ -309,6 +310,25 @@ impl App {
             "RTX cards. OptiScaler is downloaded and checked on first use; the DLSS library is taken from a game you \
             have installed (Steam, Epic, Xbox app). If none is found, FSR is used.",
         );
+        ui.radio_value(&mut self.settings.upscaler, Upscaler::DlssNative, "NVIDIA DLSS (native Streamline)");
+        if self.settings.upscaler == Upscaler::DlssNative {
+            egui::ComboBox::from_label("DLSS quality")
+                .selected_text(&self.settings.dlss_mode)
+                .show_ui(ui, |ui| {
+                    for (value, label) in [("ultraperformance", "Ultra Performance"), ("performance", "Performance"),
+                        ("balanced", "Balanced"), ("quality", "Quality"), ("dlaa", "DLAA")]
+                    {
+                        ui.selectable_value(&mut self.settings.dlss_mode, value.to_owned(), label);
+                    }
+                });
+            egui::ComboBox::from_label("DLSS model")
+                .selected_text(&self.settings.dlss_model)
+                .show_ui(ui, |ui| {
+                    for (value, label) in [("default", "Default"), ("j", "J"), ("k", "K"), ("l", "L"), ("m", "M")] {
+                        ui.selectable_value(&mut self.settings.dlss_model, value.to_owned(), label);
+                    }
+                });
+        }
         ui.add_space(14.0);
         ui.label(RichText::new("Frame generation (off by default)").strong());
         note(
@@ -353,12 +373,17 @@ impl App {
         ui.radio_value(
             &mut self.settings.framegen,
             FrameGen::DlssStreamline,
-            "NVIDIA DLSS Frame Generation (Streamline, RTX 40/50, 2x)",
+            "NVIDIA DLSS Frame Generation (Streamline, RTX 40/50)",
         );
         note(
             ui,
-            "NVIDIA's own frame generation, driven by the game's depth and motion vectors; FSR keeps upscaling. NVIDIA Streamline is downloaded from NVIDIA's GitHub (276 MB, once) and checked on first use. Needs hardware-accelerated GPU scheduling on in Windows.",
+            "Uses the game's depth and motion vectors with native DLSS or FSR upscaling. NVIDIA Streamline is downloaded from NVIDIA's GitHub (276 MB, once) and checked on first use. Needs hardware-accelerated GPU scheduling on in Windows.",
         );
+        if self.settings.framegen == FrameGen::DlssStreamline {
+            ui.checkbox(&mut self.settings.dlss_fg_at_start, "Enable at launch");
+            ui.add(egui::Slider::new(&mut self.settings.dlss_fg_multiplier, 2..=6).text("Requested multiplier"));
+            note(ui, "F1 can switch a prepared backend live. The driver limits the supported multiplier.");
+        }
         ui.add_space(10.0);
         ui.label(RichText::new("Multipliers above 2x: FSR frame generation and Smooth Motion are 2x only, and DLSS 3x/4x \
             needs an RTX 50 card.").color(DIM).small());

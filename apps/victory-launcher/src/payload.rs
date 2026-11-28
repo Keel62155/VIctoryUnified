@@ -3,6 +3,7 @@ use std::io::{self, Write};
 use std::path::{Path, PathBuf};
 
 const FILES: &[(&str, &[u8])] = &[
+    ("bindings.ini", include_bytes!("../../../bindings.ini")),
     ("LICENSE.txt", include_bytes!("../../../LICENSE")),
     ("THIRD_PARTY.md", include_bytes!("../../../THIRD_PARTY.md")),
     (
@@ -26,7 +27,7 @@ const FILES: &[(&str, &[u8])] = &[
 
 pub fn data_home() -> io::Result<PathBuf> {
     std::env::var_os("LOCALAPPDATA")
-        .map(|path| PathBuf::from(path).join("VIctoryUnified").join("v2.0"))
+        .map(|path| PathBuf::from(path).join("VIctoryUnified").join("renderer-preview"))
         .ok_or_else(|| io::Error::new(io::ErrorKind::NotFound, "LOCALAPPDATA is unavailable"))
 }
 
@@ -40,6 +41,7 @@ pub fn install(root: &Path) -> io::Result<()> {
         .chain(FILES.iter().copied())
     {
         let path = root.join(relative);
+        if relative == "bindings.ini" && path.is_file() { continue; }
         if fs::read(&path).is_ok_and(|installed| installed == bytes) {
             continue;
         }

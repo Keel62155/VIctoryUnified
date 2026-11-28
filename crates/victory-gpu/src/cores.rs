@@ -97,7 +97,7 @@ pub fn title_affinity(mask: usize, group: u16) {
 }
 
 /// The switches of where our threads run, each read from its variable (on
-/// only when set to `1`) or changed while the title runs (`crate::ab`).
+/// unless `0`) or changed while the title runs (`crate::ab`).
 const SWITCHES: [&str; 2] = ["VICTORY_PLACE_APART", "VICTORY_PLACE_LANE"];
 
 /// Each of [`SWITCHES`] as changed while the title runs: 0 as its variable
@@ -117,11 +117,11 @@ fn switched(i: usize) -> bool {
         return on;
     }
     static ON: [OnceLock<bool>; 2] = [const { OnceLock::new() }; 2];
-    *ON[i].get_or_init(|| std::env::var_os(SWITCHES[i]).is_some_and(|v| v == "1"))
+    *ON[i].get_or_init(|| std::env::var_os(SWITCHES[i]).is_none_or(|v| v != "0"))
 }
 
 /// Whether the threads that translate lists run on the slow cores the
-/// title leaves (opt-in with `VICTORY_PLACE_APART=1`).
+/// title leaves (on by default; `VICTORY_PLACE_APART=0`: where they were).
 ///
 /// Why: the title's threads run where it asks, as on the console. On an
 /// i9-12900K its eight busy workers are on logical processors 0-7 (four
@@ -140,7 +140,7 @@ fn apart() -> bool {
 }
 
 /// Whether the thread that prepares submissions runs on the fast cores the
-/// title leaves (opt-in with `VICTORY_PLACE_LANE=1`):
+/// title leaves (on by default; `VICTORY_PLACE_LANE=0`: on all fast ones):
 /// 14-15 on an i9-12900K, where nothing of the title's runs.
 fn lane_apart() -> bool {
     switched(1)

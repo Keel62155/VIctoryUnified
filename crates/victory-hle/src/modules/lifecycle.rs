@@ -13,7 +13,8 @@ use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::{Mutex, MutexGuard};
 use std::time::Duration;
 
-use windows_sys::Win32::Foundation::{HINSTANCE, HWND, LPARAM, LRESULT, RECT, WPARAM};
+use windows_sys::Win32::Foundation::{HINSTANCE, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM};
+use windows_sys::Win32::Graphics::Gdi::ClientToScreen;
 use windows_sys::Win32::System::Threading::{GetCurrentProcess, TerminateProcess};
 use windows_sys::Win32::UI::WindowsAndMessaging::{self as wm, HMENU};
 use windows_sys::core::{PCSTR, PCWSTR, w};
@@ -96,6 +97,92 @@ pub extern "system" fn UnregisterAppConstrainedChangeNotification(registration: 
 /// The window procedure a title window had before ours.
 const TITLE_PROC: PCWSTR = w!("victory.wndproc");
 
+/// Fullscreen, the English keyboard and the mouse capture are asked for
+/// (`=1`, or the F1 menu): left unset, the window and input stay as before.
+pub(super) fn enabled(name: &str) -> bool {
+    std::env::var_os(name).is_some_and(|v| v == "1")
+}
+
+fn fullscreen(hwnd: HWND) {
+    if !enabled("VICTORY_FULLSCREEN") {
+        return;
+    }
+    // SAFETY: this thread owns the newly created top-level window.
+    unsafe {
+        let (width, height) = std::env::var("VICTORY_FULLSCREEN_RES")
+            .ok().as_deref().and_then(parse_window_limit)
+            .unwrap_or_else(|| (wm::GetSystemMetrics(wm::SM_CXSCREEN), wm::GetSystemMetrics(wm::SM_CYSCREEN)));
+        let style = wm::GetWindowLongW(hwnd, wm::GWL_STYLE) as u32;
+        let ex = wm::GetWindowLongW(hwnd, wm::GWL_EXSTYLE) as u32;
+        wm::SetWindowLongW(hwnd, wm::GWL_STYLE, ((style & !wm::WS_OVERLAPPEDWINDOW) | wm::WS_POPUP) as i32);
+        wm::SetWindowLongW(hwnd, wm::GWL_EXSTYLE, (ex & !(wm::WS_EX_CLIENTEDGE | wm::WS_EX_WINDOWEDGE | wm::WS_EX_DLGMODALFRAME | wm::WS_EX_STATICEDGE)) as i32);
+        wm::SetWindowPos(hwnd, std::ptr::null_mut(), 0, 0, width, height,
+            wm::SWP_FRAMECHANGED | wm::SWP_NOZORDER | wm::SWP_NOACTIVATE);
+    }
+}
+
+fn english_input() {
+    use windows_sys::Win32::UI::Input::KeyboardAndMouse as kb;
+    if !enabled("VICTORY_IME_ENGLISH") {
+        return;
+    }
+    // SAFETY: enumerate loaded layouts; activate only on the window's thread.
+    unsafe {
+        static ENGLISH: std::sync::OnceLock<usize> = std::sync::OnceLock::new();
+        let layout = *ENGLISH.get_or_init(|| {
+            let mut layouts = vec![std::ptr::null_mut(); kb::GetKeyboardLayoutList(0, std::ptr::null_mut()).max(0) as usize];
+            let count = kb::GetKeyboardLayoutList(layouts.len() as i32, layouts.as_mut_ptr()).max(0) as usize;
+            let found = layouts.iter().take(count).find(|&&h| h as usize & 0xffff_ffff == 0x0409_0409).copied();
+            if found.is_none() { tracing::warn!("en-US keyboard layout unavailable; keeping current input language"); }
+            found.unwrap_or(std::ptr::null_mut()) as usize
+        });
+        if layout != 0 { kb::ActivateKeyboardLayout(layout as kb::HKL, 0); }
+    }
+}
+
+#[derive(Default)]
+struct MouseCapture {
+    window: usize,
+    center: (i32, i32),
+    reference: Option<(i32, i32)>,
+    hidden: i32,
+}
+static MOUSE_CAPTURE: std::sync::LazyLock<Mutex<MouseCapture>> =
+    std::sync::LazyLock::new(|| Mutex::new(MouseCapture::default()));
+
+fn capture_mouse(hwnd: HWND, active: bool) {
+    if !enabled("VICTORY_MOUSE_CAPTURE") { return; }
+    let mut state = MOUSE_CAPTURE.lock().unwrap_or_else(|e| e.into_inner());
+    // SAFETY: runs on the window thread; local geometry, balanced cursor count.
+    unsafe {
+        if active && !wm::GetParent(hwnd).is_null() { return; }
+        let active = active && wm::GetForegroundWindow() == hwnd && wm::IsIconic(hwnd) == 0;
+        if !active {
+            if state.window == hwnd as usize {
+                wm::ClipCursor(std::ptr::null());
+                for _ in 0..state.hidden { wm::ShowCursor(1); }
+                *state = MouseCapture::default();
+            }
+            return;
+        }
+        if state.window != 0 && state.window != hwnd as usize { return; }
+        let (mut area, mut origin) = (RECT::default(), POINT::default());
+        if wm::GetClientRect(hwnd, &mut area) == 0 || ClientToScreen(hwnd, &mut origin) == 0
+            || area.right <= 0 || area.bottom <= 0 { return; }
+        let center = (origin.x + area.right / 2, origin.y + area.bottom / 2);
+        area.left += origin.x; area.right += origin.x;
+        area.top += origin.y; area.bottom += origin.y;
+        if wm::ClipCursor(&area) == 0 { return; }
+        if state.window == 0 {
+            state.hidden = 1 + (wm::ShowCursor(0) + 1).max(0);
+            for _ in 1..state.hidden { wm::ShowCursor(0); }
+        }
+        if state.center != center { state.reference = None; }
+        state.window = hwnd as usize;
+        state.center = center;
+    }
+}
+
 pub extern "system" fn CreateWindowExW(
     ex_style: u32,
     class: PCWSTR,
@@ -118,6 +205,10 @@ pub extern "system" fn CreateWindowExW(
         )
     };
     hook(hwnd);
+    if parent.is_null() && !hwnd.is_null() && style & wm::WS_CHILD == 0 {
+        fullscreen(hwnd);
+        english_input();
+    }
     hwnd
 }
 
@@ -144,6 +235,10 @@ pub extern "system" fn CreateWindowExA(
         )
     };
     hook(hwnd);
+    if parent.is_null() && !hwnd.is_null() && style & wm::WS_CHILD == 0 {
+        fullscreen(hwnd);
+        english_input();
+    }
     hwnd
 }
 
@@ -261,6 +356,13 @@ extern "system" fn window_proc(
     if message == wm::WM_SYSCOMMAND && wparam & 0xFFF0 == wm::SC_KEYMENU as usize {
         return 0;
     }
+    if !super::gameinput::mnk::enabled() {
+        match message {
+            wm::WM_ACTIVATE => capture_mouse(hwnd, wparam & 0xffff != wm::WA_INACTIVE as usize),
+            wm::WM_KILLFOCUS | wm::WM_NCDESTROY => capture_mouse(hwnd, false),
+            _ => {}
+        }
+    }
     // SAFETY: the procedure `hook` stored, called the way the system would.
     unsafe {
         let title = wm::GetPropW(hwnd, TITLE_PROC);
@@ -360,6 +462,24 @@ pub(crate) fn relaunch(args: Vec<std::ffi::OsString>) {
 pub fn wait_for_previous() {
     use windows_sys::Win32::Foundation::{CloseHandle, HANDLE};
     use windows_sys::Win32::System::Threading::WaitForSingleObject;
+    if let Ok(pid) = std::env::var("VICTORY_F1_PREVIOUS_PID")
+        && let Ok(pid) = pid.parse::<u32>()
+        && pid != std::process::id()
+    {
+        use windows_sys::Win32::System::Threading::{OpenProcess, PROCESS_SYNCHRONIZE};
+        // SAFETY: a synchronization-only handle for the app process that spawned this child.
+        unsafe {
+            let previous = OpenProcess(PROCESS_SYNCHRONIZE, 0, pid);
+            if !previous.is_null() {
+                let result = WaitForSingleObject(previous, 30_000);
+                CloseHandle(previous);
+                if result != 0 {
+                    eprintln!("The previous game session has not finished closing.");
+                    std::process::exit(1);
+                }
+            }
+        }
+    }
     let Some(handle) = std::env::var(RELAUNCHED_FROM)
         .ok()
         .and_then(|h| h.parse::<usize>().ok())

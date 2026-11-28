@@ -79,6 +79,12 @@ pub mod shader_cache;
 #[cfg(windows)]
 pub mod streamline;
 #[cfg(windows)]
+pub mod save_share;
+#[cfg(windows)]
+pub static SETTINGS_MENU_OPEN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+#[cfg(windows)]
+pub static MNK_BINDINGS_CHANGED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
+#[cfg(windows)]
 pub use cores::title_affinity;
 #[cfg(windows)]
 mod memory;
@@ -128,3 +134,9 @@ pub use watch::{
     title_memory_remapping, title_memory_splitting, title_memory_unmapping, title_memory_written,
     writing as kernel_will_write,
 };
+
+#[cfg(windows)]
+pub fn remember_launch_environment() { host::menu::remember_launch_environment(); }
+
+#[cfg(windows)]
+pub fn settings_menu_key(key: u16) { host::menu::controller_key(key); }

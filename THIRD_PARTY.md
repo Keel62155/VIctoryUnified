@@ -24,6 +24,8 @@ licence that GPL-3.0 allows to be combined with it. Nothing of the game is inclu
 | [Marvisak/VIctory](https://github.com/Marvisak/VIctory) PRs #175, #463, #969, issue #753 | loading the DirectX 12 Agility SDK at run time (`agility.rs`) | GPL-3.0 |
 | [Biskwit/VIctory-reloaded](https://github.com/Biskwit/VIctory-reloaded) | opt-in CPU placement, split submission and offline preparation | GPL-3.0-or-later |
 
+This preview also adapts the F1 menu, F3 panel, keyboard bindings and save exchange from VIctory-NVIDIA revision `9ce3cf9e340adb1cc8de3a681e0f1b8016d46b3e`. The title render-size selection follows the GPL-3.0-or-later implementation attributed to DexNom in `apps/victory/src/native_1440p.rs`.
+
 Each ported change names its source in a comment and in [PROGRESS.md](PROGRESS.md).
 
 ### Left out on purpose

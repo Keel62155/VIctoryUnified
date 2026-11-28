@@ -2695,7 +2695,7 @@ struct Sent {
 }
 
 /// Whether more of a published submission is left to others than the line's
-/// thread (opt-in with `VICTORY_OFF_LINE=1` and [`split_send`]; otherwise as
+/// thread (on by default with [`split_send`]; `VICTORY_OFF_LINE=0`: as
 /// before; switched by `VICTORY_AB` too): the slots its steps on the card
 /// fill ([`card_steps::Slots`]) are written by [`sender`], and host lists
 /// are closed when they are reset after running (`crate::list::recycle`),
@@ -2734,11 +2734,11 @@ pub(crate) fn off_line() -> bool {
         return on && split_send();
     }
     static ON: OnceLock<bool> = OnceLock::new();
-    *ON.get_or_init(|| std::env::var_os("VICTORY_OFF_LINE").is_some_and(|v| v == "1")) && split_send()
+    *ON.get_or_init(|| std::env::var_os("VICTORY_OFF_LINE").is_none_or(|v| v != "0")) && split_send()
 }
 
 /// Whether a submission's preparing and its sending are done by two threads
-/// in a row (opt-in with `VICTORY_SUBMIT_SPLIT=1`; otherwise one thread does both,
+/// in a row (on by default; `VICTORY_SUBMIT_SPLIT=0`: one thread does both,
 /// as before): the line's thread prepares the next submission while
 /// [`sender`] sends this one. Only with the relay's second stage, its
 /// fetches on the copy queue and the sends taken at preparing
@@ -2798,7 +2798,7 @@ fn split_send() -> bool {
         return on && relay_exact() && relay_copy() && send::own();
     }
     static ON: OnceLock<bool> = OnceLock::new();
-    *ON.get_or_init(|| std::env::var_os("VICTORY_SUBMIT_SPLIT").is_some_and(|v| v == "1") && relay_exact() && relay_copy() && send::own())
+    *ON.get_or_init(|| std::env::var_os("VICTORY_SUBMIT_SPLIT").is_none_or(|v| v != "0") && relay_exact() && relay_copy() && send::own())
 }
 
 /// What [`Host::submit`] took for copies in the card's memory, for
@@ -3996,7 +3996,8 @@ pub(crate) mod aside;
 pub(crate) mod awake;
 mod card_steps;
 pub(crate) mod indirects;
-#[cfg(feature = "diagnostics")]
+mod font;
+pub(crate) mod menu;
 mod panel;
 mod place;
 mod send;
@@ -5662,9 +5663,8 @@ impl Host {
             SEND_STATS[2].fetch_add(waiting.elapsed().as_micros() as u64, Ordering::Relaxed);
         }
         let card = h.take.take().and_then(|take| self.card_record(take, None, h.flown));
-        let check = card.as_ref().and_then(|c| c.check.clone());
-        if let Some(check) = &check {
-            h.lists.push(Some(check.clone()));
+        if let Some(check) = card.as_ref().and_then(|c| c.check.clone()) {
+            h.lists.push(Some(check));
         }
         // The plan goes with its flight before the card can reach it.
         if let Some(card) = card {
@@ -5704,14 +5704,9 @@ impl Host {
         #[cfg(feature = "diagnostics")]
         let sending = crate::timeline::ticks();
         #[cfg(feature = "diagnostics")]
-        if let Some(set) = self.span_lists() {
-            let mid_at = check.as_ref()
-                .and_then(|check| h.lists.iter().position(|list| list.as_ref() == Some(check)))
-                .unwrap_or(h.lists.len());
-            h.lists.insert(mid_at, Some(set.mid));
-            h.firsts.iter_mut().filter(|first| **first > mid_at).for_each(|first| *first += 1);
-            h.lists.insert(0, Some(set.front));
-            h.lists.push(Some(set.behind));
+        if let Some([front, behind]) = self.span_lists() {
+            h.lists.insert(0, Some(front));
+            h.lists.push(Some(behind));
             h.firsts.iter_mut().for_each(|first| *first += 1);
         }
         let cuts: Vec<usize> = h.parts.iter().filter_map(|&n| h.firsts.get(n).copied()).collect();
@@ -9292,12 +9287,15 @@ struct Presenter {
     hwnd: HWND,
     meter: Meter,
     composer: Option<crate::compose::Composer>,
-    #[cfg(feature = "diagnostics")]
     panel: panel::Panel,
+    menu: menu::Menu,
 }
 
 /// The frame rate, shown in the window's caption every second and logged
 /// every few seconds.
+pub(crate) static METER_NATIVE_SHOWN_TENTHS: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+pub(crate) static METER_FPS_TENTHS: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+
 struct Meter {
     since: std::time::Instant,
     frames: u32,
@@ -9311,6 +9309,7 @@ struct Meter {
     /// with frame generation (OptiScaler) the frames it makes are presented too, so this
     /// counts the frames shown, `frames` those the title made.
     shown_from: Option<u32>,
+    native_presented: u32,
 }
 
 impl Meter {
@@ -9325,11 +9324,11 @@ impl Meter {
             logged: now,
             caption: None,
             shown_from: None,
+            native_presented: 0,
         }
     }
 
     /// Whether the next frame counted makes the frame-rate line.
-    #[cfg(feature = "diagnostics")]
     fn line_due(&self) -> bool {
         self.since.elapsed() >= std::time::Duration::from_secs(1)
     }
@@ -9341,6 +9340,9 @@ impl Meter {
         #[cfg(feature = "diagnostics")]
         crate::copystat::presented();
         self.frames += 1;
+        if crate::streamline::framegen_live() {
+            self.native_presented += crate::streamline::shown_per_frame();
+        }
         #[cfg(feature = "diagnostics")]
         {
             self.copy_stats_frames += 1;
@@ -9358,9 +9360,13 @@ impl Meter {
             _ => None,
         };
         self.shown_from = presents;
+        let native = std::mem::take(&mut self.native_presented);
+        METER_NATIVE_SHOWN_TENTHS.store((f64::from(native) * 10.0 / elapsed.as_secs_f64()).round() as u32, Ordering::Relaxed);
+        let shown = if native != 0 { Some(f64::from(native) / elapsed.as_secs_f64()) } else { shown };
         let drawn = crate::draw::drawn();
         let frames = f64::from(self.frames);
         let fps = frames / elapsed.as_secs_f64();
+        METER_FPS_TENTHS.store((fps * 10.0).round() as u32, Ordering::Relaxed);
         let ms = elapsed.as_secs_f64() * 1000.0 / frames;
         let draws = (drawn - self.drawn) as f64 / frames;
         (self.since, self.frames, self.drawn) = (std::time::Instant::now(), 0, drawn);
@@ -9940,8 +9946,8 @@ impl Host {
             } else {
                 crate::popwatch::take(&self.device, list, texture)
             };
-            #[cfg(feature = "diagnostics")]
             p.panel.draw(self, copy, &back, (width, height), format);
+            p.menu.draw(self, copy, &back, (width, height), format);
             #[cfg(not(feature = "diagnostics"))]
             let _ = frame;
             if composed {
@@ -9997,14 +10003,16 @@ impl Host {
                 },
             );
             let called = crate::streamline::present_called(&presenting);
-            let _ = p.swap_chain.Present(0, DXGI_PRESENT(0));
+            let _ = p.swap_chain.Present(u32::from(menu::vsync().load(std::sync::atomic::Ordering::Relaxed)), DXGI_PRESENT(0));
             crate::streamline::present_returned(called);
             crate::streamline::present_ends(presenting);
             showing.next("the frame meter");
-            #[cfg(feature = "diagnostics")]
             p.panel.frame(p.meter.line_due());
+            p.menu.frame(p.hwnd.0 as usize);
             // SAFETY: a live swap chain.
-            let presents = p.swap_chain.GetLastPresentCount().ok();
+            let presents = if p.meter.line_due() || p.meter.shown_from.is_none() {
+                p.swap_chain.GetLastPresentCount().ok()
+            } else { None };
             p.meter.frame(p.hwnd, presents);
             showing.end();
             #[cfg(feature = "diagnostics")]
@@ -10090,8 +10098,8 @@ impl Host {
                 hwnd,
                 meter: Meter::new(),
                 composer: None,
-                #[cfg(feature = "diagnostics")]
                 panel: panel::Panel::new(),
+                menu: menu::Menu::new(),
             })
         }
     }

@@ -120,7 +120,15 @@ trait Source: Send {
     fn rumble(&mut self, slot: usize, low: u16, high: u16);
 }
 
+#[cfg(windows)]
+#[path = "mnk.rs"]
+pub(super) mod mnk;
+
 fn fallback(keys: &[KeyState]) -> PadState {
+    #[cfg(windows)]
+    if let Some(state) = mnk::sample() {
+        return state;
+    }
     let on = |vk: u8| {
         if keys.iter().any(|k| k.virtual_key == vk) {
             1.0
@@ -1198,6 +1206,25 @@ mod host {
             self.empty_until[slot] = None;
             #[allow(unused_mut)]
             let mut pad = convert(&state.Gamepad);
+            static LAST: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+            let open = victory_gpu::SETTINGS_MENU_OPEN.load(std::sync::atomic::Ordering::Relaxed);
+            if slot == 0 {
+                let before = LAST.swap(pad.buttons, std::sync::atomic::Ordering::Relaxed);
+                let chord = super::MENU | super::VIEW;
+                if pad.buttons & chord == chord && before & chord != chord {
+                    victory_gpu::settings_menu_key(0x70);
+                    return Some(PadState::default());
+                }
+                if open {
+                    for (bit, key) in [(super::UP, 0x26), (super::DOWN, 0x28), (super::LEFT, 0x25), (super::RIGHT, 0x27), (super::A, 0x0d), (super::B, 0x1b)] {
+                        if (pad.buttons & !before) & bit != 0 {
+                            victory_gpu::settings_menu_key(key);
+                        }
+                    }
+                }
+            }
+            if open { return Some(PadState::default()); }
+            if super::mnk::enabled() { return None; }
             // The scripted keys (`VICTORY_KEYS`) also press the first
             // pad's buttons, by the stand-in pad's table: with a real pad
             // connected the stand-in is not there, and a title that listens
@@ -1213,6 +1240,7 @@ mod host {
         }
 
         fn keys(&mut self) -> Vec<KeyState> {
+            if victory_gpu::SETTINGS_MENU_OPEN.load(std::sync::atomic::Ordering::Relaxed) { return Vec::new(); }
             let mut down = scripted();
             if focused() {
                 // Left/right modifier keys only, as devices report them; no

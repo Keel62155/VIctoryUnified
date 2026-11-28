@@ -52,6 +52,8 @@ pub enum Upscaler {
     Fsr,
     /// NVIDIA DLSS through OptiScaler (downloaded and set up on first use).
     DlssOptiScaler,
+    /// Direct NVIDIA Streamline upscaling.
+    DlssNative,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
@@ -81,6 +83,10 @@ pub struct Settings {
     pub preset: Preset,
     pub scale: Scale,
     pub upscaler: Upscaler,
+    pub dlss_mode: String,
+    pub dlss_model: String,
+    pub dlss_fg_multiplier: u32,
+    pub dlss_fg_at_start: bool,
     pub framegen: FrameGen,
     /// OptiScaler's frame generation on from the start (otherwise End turns it on).
     pub framegen_at_start: bool,
@@ -104,7 +110,11 @@ impl Default for Settings {
             game_dir: String::new(),
             preset: Preset::Balanced,
             scale: Scale::Half,
-            upscaler: Upscaler::Fsr,
+    upscaler: Upscaler::Fsr,
+            dlss_mode: "quality".into(),
+            dlss_model: "default".into(),
+            dlss_fg_multiplier: 2,
+            dlss_fg_at_start: true,
             framegen: FrameGen::Off,
             framegen_at_start: false,
             menus_60: true,

@@ -3667,7 +3667,7 @@ checksum = "0b928f33d975fc6ad9f86c8f283853ad26bdd5b10b7f1542aa2fa15e2289105a"
 
 [[package]]
 name = "victory"
-version = "2.0.0"
+version = "0.1.0"
 dependencies = [
  "anyhow",
  "blake3",
@@ -3675,6 +3675,7 @@ dependencies = [
  "memchr",
  "mimalloc",
  "victory-core",
+ "victory-formats",
  "victory-game",
  "victory-hle",
  "victory-loader",
@@ -3685,7 +3686,7 @@ dependencies = [
 
 [[package]]
 name = "victory-core"
-version = "2.0.0"
+version = "0.1.0"
 dependencies = [
  "anyhow",
  "serde",
@@ -3697,11 +3698,11 @@ dependencies = [
 
 [[package]]
 name = "victory-formats"
-version = "2.0.0"
+version = "0.1.0"
 
 [[package]]
 name = "victory-game"
-version = "2.0.0"
+version = "0.1.0"
 dependencies = [
  "memchr",
  "zlib-rs",
@@ -3709,7 +3710,7 @@ dependencies = [
 
 [[package]]
 name = "victory-gpu"
-version = "2.0.0"
+version = "0.1.0"
 dependencies = [
  "anyhow",
  "blake3",
@@ -3725,7 +3726,7 @@ dependencies = [
 
 [[package]]
 name = "victory-hle"
-version = "2.0.0"
+version = "0.1.0"
 dependencies = [
  "opus-pure",
  "tempfile",
@@ -3742,7 +3743,7 @@ dependencies = [
 
 [[package]]
 name = "victory-launcher"
-version = "2.0.0"
+version = "0.1.0"
 dependencies = [
  "eframe",
  "rfd",
@@ -3755,7 +3756,7 @@ dependencies = [
 
 [[package]]
 name = "victory-loader"
-version = "2.0.0"
+version = "0.1.0"
 dependencies = [
  "anyhow",
  "blake3",
@@ -3769,7 +3770,7 @@ dependencies = [
 
 [[package]]
 name = "victory-pe"
-version = "2.0.0"
+version = "0.1.0"
 dependencies = [
  "object",
  "thiserror 2.0.21",
@@ -3777,7 +3778,7 @@ dependencies = [
 
 [[package]]
 name = "victory-pipeline"
-version = "2.0.0"
+version = "0.1.0"
 dependencies = [
  "anyhow",
  "blake3",
@@ -3788,7 +3789,7 @@ dependencies = [
 
 [[package]]
 name = "victory-shader"
-version = "2.0.0"
+version = "0.1.0"
 dependencies = [
  "thiserror 2.0.21",
  "windows",
@@ -4573,7 +4574,7 @@ checksum = "e450f9b2ed1dff33c94c12589a87338689467b9c4f5d8a5710bd09a847d2c8a7"
 
 [[package]]
 name = "xtask"
-version = "2.0.0"
+version = "0.1.0"
 dependencies = [
  "anyhow",
  "clap",

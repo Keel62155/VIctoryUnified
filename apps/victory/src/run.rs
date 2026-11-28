@@ -1,3 +1,7 @@
+#[cfg(windows)]
+#[path = "native_1440p.rs"]
+mod native_1440p;
+
 use std::path::Path;
 
 use anyhow::{Context, Result};
@@ -50,36 +54,60 @@ pub fn run(
     if execute {
         check_cpu_features()?;
     }
-    // A title that relaunched itself: the old process must be gone first.
     victory_hle::modules::lifecycle::wait_for_previous();
-    let cfg = victory_core::Config::load()?;
-    // DLSS Frame Generation (`VICTORY_FRAMEGEN=1`, ported from shuffl3r/victory-nvidia):
-    // Streamline is loaded before anything of the title or the host GPU, and fails soft
-    // (the plain present runs). The title's own FidelityFX path (Series S, the PC FSR DLL)
-    // keeps upscaling; frame generation takes its depth and motion vectors.
-    #[cfg(windows)]
+    if execute && std::env::var_os("VICTORY_PRELOAD").is_some_and(|v| v == "1")
+        && let Some(folder) = exe.parent()
     {
-        let asked = victory_hle::streamline::Asked::from_env().map_err(anyhow::Error::msg)?;
-        if asked.framegen {
-            let available = victory_hle::streamline::init(&asked);
-            println!(
-                "frame gen      DLSS Frame Generation {} (Streamline in {})",
-                if available.framegen { "on" } else { "asked, not available (the log says why)" },
-                asked.dir.display()
-            );
-        }
+        let program = std::env::current_exe()?;
+        let result = std::process::Command::new(program).args(["shaders", "--jobs", "6"])
+            .arg(folder.join("shaders.rpf")).status()?;
+        anyhow::ensure!(result.success(), "shader preload failed: {result}");
     }
+    let cfg = victory_core::Config::load()?;
+    let asked = victory_hle::streamline::Asked::from_env().map_err(anyhow::Error::msg)?;
+    let native_dlss = if execute && asked.any() {
+        let available = victory_hle::streamline::init(&asked);
+        println!("upscaling      native DLSS: {}, DLSS frame generation ready: {}", available.dlss, available.framegen);
+        available.dlss
+    } else {
+        false
+    };
     let original = std::fs::read(exe).with_context(|| format!("reading {}", exe.display()))?;
-    let prepared = victory_loader::prepare(&original)?;
+    let mut prepared = victory_loader::prepare(&original)?;
     let hash = prepared.original_hash.to_hex();
     match victory_game::identify(&hash) {
         Some(build) => println!("build          {} ({hash})", build.label),
         None => println!("build          unknown ({hash})"),
     }
 
-    let images = cfg.cache_subdir("images")?;
+    let render_1080 = std::env::var("VICTORY_RENDER_1080P").as_deref() == Ok("1");
+    let output_1440 = matches!(console, Console::SeriesX)
+        && (render_1080 || std::env::var("VICTORY_NATIVE_1440P").as_deref() == Ok("1"));
+    if output_1440 {
+        native_1440p::prepare(&mut prepared, render_1080 && !native_dlss)?;
+        // SAFETY: set derived output dimensions before the title or GPU is started.
+        if std::env::var_os("VICTORY_DISPLAY_MODE").is_none() {
+            unsafe { std::env::set_var("VICTORY_DISPLAY_MODE", "2560x1440") };
+        }
+    }
+    if native_dlss {
+        native_1440p::prepare_upscaler(&mut prepared, asked.mode)?;
+    }
+    let image_cache = match (output_1440, native_dlss, render_1080) {
+        (false, false, _) => "images".to_owned(),
+        (false, true, _) => format!("images/dlss-{}", asked.mode.name()),
+        (true, true, _) => format!("images/1440p-dlss-{}", asked.mode.name()),
+        (true, false, true) => "images/1080to1440".to_owned(),
+        (true, false, false) => "images/1440p".to_owned(),
+    };
+    let images = cfg.cache_subdir(&image_cache)?;
     victory_hle::modules::d3d12x::use_shader_cache(cfg.cache_subdir("shaders")?);
-    let image = victory_loader::load(&prepared, &images)?;
+
+    let image = if native_dlss || output_1440 {
+        victory_loader::load_prescaled(&prepared, &images)?
+    } else {
+        victory_loader::load(&prepared, &images)?
+    };
     // The program is mapped from the copy `load` wrote: the file's bytes
     // and their patched copy are not read again, and were held for the
     // whole run (two blocks of 114.7 MB each for the title, in
@@ -115,6 +143,11 @@ pub fn run(
     // The console's fixed drives: the package as `G:`, temporary files `T:`.
     victory_hle::modules::files::mount_at('G', title_dir);
     let temp = cfg.data_subdir(&format!("{:08X}/temp", title.id))?;
+    if execute && let Some(data) = temp.parent()
+        && let Some(result) = victory_hle::save_share::start(data)
+    {
+        println!("save           {result}");
+    }
     victory_hle::modules::files::mount_at('T', &temp);
     victory_hle::runtime::set_title(victory_hle::runtime::Title { storage, ..title });
     victory_hle::console::set(match console {
@@ -224,6 +257,7 @@ pub fn run(
     victory_hle::runtime::set_title_dll_loader(Box::new(move |file| {
         late.load(file, show).map_err(|e| format!("{e:#}"))
     }));
+    crate::scripthook_host::start(title_dir, image.base(), image.info().size_of_image as u64, image.info().timestamp);
     // SAFETY: imports are bound; from here on we run title code.
     let main = unsafe { Arc::new(image).spawn_main(dlls)? };
     let code = main

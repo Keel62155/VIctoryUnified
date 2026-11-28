@@ -53,6 +53,15 @@ pub struct BindReport {
 ///
 /// `dir` receives derived game data, so it must be outside the repository.
 pub fn load(prepared: &PreparedImage, dir: &Path) -> Result<LoadedImage> {
+    load_impl(prepared, dir, true)
+}
+
+/// Map a title whose resolution is already encoded into its prepared image.
+pub fn load_prescaled(prepared: &PreparedImage, dir: &Path) -> Result<LoadedImage> {
+    load_impl(prepared, dir, false)
+}
+
+fn load_impl(prepared: &PreparedImage, dir: &Path, apply_resolution_levers: bool) -> Result<LoadedImage> {
     victory_core::ensure_outside_repo(dir)?;
     std::fs::create_dir_all(dir).with_context(|| format!("creating {}", dir.display()))?;
     let path = dir.join(prepared.file_name());
@@ -93,7 +102,7 @@ pub fn load(prepared: &PreparedImage, dir: &Path) -> Result<LoadedImage> {
         tracing::info!(applied, "title watchdog hooks ({})", crate::hooks::NO_WATCHDOG_ENV);
     }
     // SAFETY: just mapped, and no title code has run.
-    let levers = unsafe { crate::hooks::resolution_levers(loaded.base(), &prepared.original_hash) };
+    let levers = if apply_resolution_levers { unsafe { crate::hooks::resolution_levers(loaded.base(), &prepared.original_hash) } } else { 0 };
     if levers > 0 {
         tracing::warn!(
             applied = levers,

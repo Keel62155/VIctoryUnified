@@ -8,7 +8,10 @@ mod inspect;
 #[cfg(all(windows, feature = "diagnostics"))]
 mod replay;
 mod run;
+#[cfg(windows)]
+mod scripthook_host;
 mod shader;
+mod session_settings;
 #[cfg(windows)]
 mod smooth_motion;
 mod translate;
@@ -173,6 +176,24 @@ enum Command {
         #[arg(last = true)]
         title_args: Vec<String>,
     },
+    /// Start a title from PalmVI or another external launcher.
+    Play {
+        exe: PathBuf,
+        #[arg(long)]
+        series_s: bool,
+        #[arg(long = "set", value_name = "NAME=VALUE")]
+        settings: Vec<String>,
+        #[arg(long)]
+        dlss: Option<String>,
+        #[arg(long)]
+        res: Option<String>,
+        #[arg(long)]
+        fg_type: Option<String>,
+        #[arg(long)]
+        framegen: Option<u32>,
+        #[arg(long)]
+        fps: Option<u32>,
+    },
     /// Run a captured frame's GPU work again (diagnostics builds; see
     /// docs/replay.md).
     #[cfg(all(windows, feature = "diagnostics"))]
@@ -197,10 +218,9 @@ enum Console {
 /// is written by LLVM's runtime at a clean exit, and a game session ends when the window is
 /// closed or the process ended; so a thread writes it every `VICTORY_PGO_DUMP_SECS` seconds
 /// (default 20) and the last write before the end is what is merged.
-/// The release allocator (`mimalloc` feature, on by default): the Windows heap took about a
+/// The global allocator (`mimalloc` feature, on by default): the Windows heap took about a
 /// quarter of the submitting thread's samples (allocations, frees, its lock).
-// GPU diagnostics install their own allocation-counting allocator.
-#[cfg(all(feature = "mimalloc", not(feature = "diagnostics")))]
+#[cfg(feature = "mimalloc")]
 #[global_allocator]
 static ALLOCATOR: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
@@ -220,15 +240,32 @@ fn pgo_dumps() {
 }
 
 fn main() -> Result<()> {
+    let cli = Cli::parse();
+    match &cli.command {
+        Command::Run { execute: true, console, .. } => {
+            let explicit = std::env::args().any(|arg| arg == "--console" || arg.starts_with("--console="));
+            session_settings::apply(&[], explicit.then(|| if matches!(console, Console::SeriesS) { "series-s" } else { "series-x" }))?;
+        }
+        Command::Play { series_s, settings, dlss, res, fg_type, framegen, fps, .. } => {
+            let mut input = Vec::new();
+            if let Some(value) = dlss { input.push(format!("VICTORY_MENU_DLSS={value}")); }
+            if let Some(value) = res { input.push(format!("VICTORY_MENU_RES={value}")); }
+            if let Some(value) = fg_type { input.push(format!("VICTORY_MENU_FG_TYPE={value}")); }
+            if let Some(value) = framegen { input.push(format!("VICTORY_MENU_FRAMEGEN={value}")); }
+            if let Some(value) = fps { input.push(format!("VICTORY_MENU_FPS={value}")); }
+            input.extend(settings.iter().cloned());
+            session_settings::apply(&input, series_s.then_some("series-s"))?;
+        }
+        Command::Shaders { .. } | Command::Config => session_settings::apply(&[], None)?,
+        #[cfg(windows)]
+        Command::Warm { .. } => session_settings::apply(&[], None)?,
+        _ => {}
+    }
     victory_core::logging::init("info");
     #[cfg(feature = "pgo")]
     pgo_dumps();
-    // The audio recorder `run` starts for `VICTORY_AUDIO_CAPTURE`.
     #[cfg(all(windows, feature = "diagnostics"))]
-    if victory_hle::modules::audio::capture::child() {
-        return Ok(());
-    }
-    let cli = Cli::parse();
+    if victory_hle::modules::audio::capture::child() { return Ok(()); }
     match cli.command {
         Command::Inspect {
             file,
@@ -263,11 +300,11 @@ fn main() -> Result<()> {
                 victory_shader::emit::set_host_max_wave(n);
             }
             if let Some(file) = warm {
-                return translate::warm(paths, &file, jobs);
+                return translate::warm(paths, &file, Some(6));
             }
             translate::run(paths, validate, pipelines, list, jobs)
         }
-        Command::Shaders { paths, jobs } => translate::precompile(paths, jobs),
+        Command::Shaders { paths, .. } => translate::precompile(paths, Some(6)),
         #[cfg(windows)]
         Command::SmoothMotion { what } => smooth_motion::run(&what),
         #[cfg(windows)]
@@ -282,7 +319,7 @@ fn main() -> Result<()> {
             Ok(())
         }
         #[cfg(windows)]
-        Command::Warm { jobs, limit, again, used, these } => warm::run(jobs, limit, again, used, these),
+        Command::Warm { limit, again, used, these, .. } => warm::run(Some(6), limit, again, used, these),
         Command::Run {
             exe,
             unimplemented,
@@ -292,11 +329,22 @@ fn main() -> Result<()> {
             title_args,
         } => {
             victory_hle::runtime::set_title_args(title_args);
-            run::run(&exe, unimplemented, strict, execute, console)
+            run::run(&exe, unimplemented, strict, execute, effective_console(console))
+        }
+        Command::Play { exe, .. } => {
+            run::run(&exe, Unimplemented::Trap, false, true, effective_console(Console::SeriesX))
         }
         #[cfg(all(windows, feature = "diagnostics"))]
         Command::Replay(options) => replay::run(options),
         Command::Config => show_config(),
+    }
+}
+
+fn effective_console(fallback: Console) -> Console {
+    match std::env::var("VICTORY_CONSOLE").as_deref() {
+        Ok("series-s") => Console::SeriesS,
+        Ok("series-x") => Console::SeriesX,
+        _ => fallback,
     }
 }
 
