@@ -1,4 +1,33 @@
-# cool_fox on an RTX 4060 8 GB: progress
+# VIctoryUnified progress
+
+## v2.0 source release
+
+The source package carries the graphical launcher, three presets, automatic dependency setup and
+six-worker shader warming. The verification scope is the Windows release build, existing tests,
+Clippy and the launcher CLI smoke test. The measurements below are historical and describe their
+original builds and settings. Gameplay, visual correctness and live dependency downloads have no
+new end-to-end verification for this package.
+
+The native Streamline path handles D3D12 swap chain integration, frame input tagging and generated
+presents. It is experimental and off by default. FSR remains the upscaler with native DLSS Frame
+Generation selected. The menu/video interval and the generated presentation rate are independent of
+the game's rendered frame rate.
+
+These ports require explicit opt-in with a value of 1:
+
+| Switch | Behavior |
+| --- | --- |
+| VICTORY_PLACE_APART | Moves list workers onto available efficiency cores |
+| VICTORY_PLACE_LANE | Moves submission preparation onto available performance cores |
+| VICTORY_SUBMIT_SPLIT | Separates submission preparation from queue submission with the required relay mode |
+| VICTORY_OFF_LINE | Moves additional work off the preparation thread with split submission enabled |
+| VICTORY_REFLEX_SLEEP | Enables Reflex sleep on the presentation thread when Streamline is active |
+
+The public source package uses the GPL-compatible v1.1 loader implementation for instruction
+emulation and write-site helpers. The XCL-derived decoder and handler from the working tree are excluded.
+
+## Earlier development
+
 
 PC: Intel i7-14700F (8 P + 12 E cores, 28 threads), RTX 4060 8 GB, 32 GB RAM, Windows 11,
 Resizable BAR on (since 2026-11-26). Base: codec_d's cool_fox (commit e12c29f).
@@ -47,7 +76,7 @@ tied to `VICTORY_RELAY=2` / `VICTORY_CARD_STEPS=2` (gone with the safe settings,
 | `VICTORY_RENDER_SCALE=0.5` through the FSR DLL, FSR's maximum left alone (now the default of the patch) | measured here | picture right; card 69 % busy; 51-58 ms in the cell: **the CPU now sets the frame time** |
 | compares and rehashes batched per copy (`VICTORY_CARD_BATCH`, tried) | measured here | 53.5 -> 54.2 ms, no gain: 400 compared ranges a frame are 400 different copies, and the rehash list's time is its uploads; reverted |
 
-### 2026-11-27: the submitting thread, other forks, Agility SDK, 60 fps (VIctoryUnified v1.1)
+### 2026-11-27: the submitting thread, other forks, Agility SDK, menu/video timing (VIctoryUnified v1.1)
 
 Measured with the walk-free cell runs (half scale through FSR, 200 s, frame times from 160 s,
 "steady") on one build; identical settings spread about +-5 % between runs, so one run says little

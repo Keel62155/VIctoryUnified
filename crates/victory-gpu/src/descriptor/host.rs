@@ -13,6 +13,29 @@ use windows::Win32::Graphics::Dxgi::Common::*;
 use super::{VIEW_TAG, View, view_at};
 use crate::host::host;
 
+/// Diagnostics: [`HostHeap::recorded`]'s notes, by host heap and slot (the
+/// note's number, whether a draw's table), and how many there were.
+/// (From Biskwit/VIctory-reloaded 821867c, `VICTORY_OFF_LINE`.)
+#[cfg(feature = "diagnostics")]
+#[allow(clippy::type_complexity)]
+static RECORDED: (std::sync::Mutex<Option<std::collections::HashMap<(usize, u32), (u64, bool)>>>, std::sync::atomic::AtomicU64) =
+    (std::sync::Mutex::new(None), std::sync::atomic::AtomicU64::new(0));
+
+/// Diagnostics: whether [`HostHeap::recorded`] notes (`VICTORY_SLOT_ORDER_COUNT=1`:
+/// a lock for each changed record).
+#[cfg(feature = "diagnostics")]
+pub(crate) fn order_counted() -> bool {
+    static ON: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    *ON.get_or_init(|| std::env::var_os("VICTORY_SLOT_ORDER_COUNT").is_some_and(|v| v == "1"))
+}
+
+/// Diagnostics: the notes made so far ([`HostHeap::recorded`]).
+#[cfg(feature = "diagnostics")]
+pub(crate) fn recorded_so_far() -> u64 {
+    RECORDED.1.load(std::sync::atomic::Ordering::Relaxed)
+}
+
+
 /// A set of a heap's slots, a bit for each: no lock (a pass that went through
 /// a set of 70,000 under its lock kept everyone who writes slots waiting for
 /// 5 ms of a frame, timeline thin-6).
@@ -3212,6 +3235,42 @@ impl HostHeap {
         out
     }
 
+    /// Diagnostics (`VICTORY_SLOT_ORDER_COUNT=1`): the title's record at
+    /// slot `index` is another than the one last made there (by a draw's
+    /// table: `for_draw`), noted with the number of such notes so far.
+    #[cfg(feature = "diagnostics")]
+    fn recorded(&self, index: u32, for_draw: bool) {
+        if !order_counted() {
+            return;
+        }
+        let n = RECORDED.1.fetch_add(1, std::sync::atomic::Ordering::Relaxed) + 1;
+        RECORDED.0.lock().unwrap_or_else(|e| e.into_inner()).get_or_insert_default().insert((std::ptr::from_ref(self) as usize, index), (n, for_draw));
+    }
+
+    /// Diagnostics: of `slots` of this heap, those whose title record
+    /// changed after note `since` ([`Self::recorded`]): by the heap sync or
+    /// a texture's wait, and by a draw's table; and those whose record
+    /// changed at all while notes were made.
+    #[cfg(feature = "diagnostics")]
+    pub(crate) fn recorded_since(&self, slots: impl Iterator<Item = u32>, since: u64) -> [u64; 3] {
+        let mut found = [0u64; 3];
+        let recorded = RECORDED.0.lock().unwrap_or_else(|e| e.into_inner());
+        let Some(recorded) = recorded.as_ref() else {
+            return found;
+        };
+        let at = std::ptr::from_ref(self) as usize;
+        for index in slots {
+            let Some(&(n, for_draw)) = recorded.get(&(at, index)) else {
+                continue;
+            };
+            found[2] += 1;
+            if n > since {
+                found[usize::from(for_draw)] += 1;
+            }
+        }
+        found
+    }
+
     /// Makes host slot `index` from the record the title has at `handle`
     /// if it changed since, and returns the view recorded there. Buffer
     /// views are made only for draws (`for_draw`), which also copy their
@@ -3249,6 +3308,10 @@ impl HostHeap {
         let held = self.made.lock(index);
         let shown = self.made.get(index).unwrap_or(0);
         let view = (tag == VIEW_TAG).then(|| view_at(i, generation)).flatten();
+        #[cfg(feature = "diagnostics")]
+        if if view.is_some() { shown != key } else { shown != 0 } {
+            self.recorded(index, for_draw);
+        }
         let Some(view) = view else {
             // Not a view of ours (never written, or of a resource the
             // title released): nothing to read.

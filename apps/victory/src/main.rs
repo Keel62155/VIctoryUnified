@@ -9,6 +9,8 @@ mod inspect;
 mod replay;
 mod run;
 mod shader;
+#[cfg(windows)]
+mod smooth_motion;
 mod translate;
 #[cfg(windows)]
 mod warm;
@@ -105,6 +107,30 @@ enum Command {
         #[arg(long)]
         jobs: Option<usize>,
     },
+    /// NVIDIA Smooth Motion (the driver's frame generation, RTX 40/50) for victory.exe:
+    /// `status`, `on` or `off`. Writes only its two settings into the driver profile that
+    /// holds victory.exe.
+    /// DLSS Frame Generation's check without the title (Streamline, from
+    /// shuffl3r/victory-nvidia): whether Streamline loads and what this GPU
+    /// supports; with --present, three seconds of presents with frame
+    /// generation on stand-in depth and motion vectors.
+    #[cfg(windows)]
+    UpscalerCheck {
+        /// The output size, `<width>x<height>`.
+        #[arg(long, default_value = "1920x1080")]
+        output: String,
+        /// Make the host device and run DLSS on it.
+        #[arg(long)]
+        device: bool,
+        /// Present for three seconds with frame generation (with --device).
+        #[arg(long)]
+        present: bool,
+    },
+    #[cfg(windows)]
+    SmoothMotion {
+        /// status, on or off
+        what: String,
+    },
     /// Make the host pipelines of every pipeline the title ever created
     /// (runs with `VICTORY_PIPELINE_BOOK=1` write them down), so that the
     /// driver's cache on disk has them before a run needs one: once per change
@@ -171,9 +197,10 @@ enum Console {
 /// is written by LLVM's runtime at a clean exit, and a game session ends when the window is
 /// closed or the process ended; so a thread writes it every `VICTORY_PGO_DUMP_SECS` seconds
 /// (default 20) and the last write before the end is what is merged.
-/// The global allocator (`mimalloc` feature, on by default): the Windows heap took about a
+/// The release allocator (`mimalloc` feature, on by default): the Windows heap took about a
 /// quarter of the submitting thread's samples (allocations, frees, its lock).
-#[cfg(feature = "mimalloc")]
+// GPU diagnostics install their own allocation-counting allocator.
+#[cfg(all(feature = "mimalloc", not(feature = "diagnostics")))]
 #[global_allocator]
 static ALLOCATOR: mimalloc::MiMalloc = mimalloc::MiMalloc;
 
@@ -241,6 +268,19 @@ fn main() -> Result<()> {
             translate::run(paths, validate, pipelines, list, jobs)
         }
         Command::Shaders { paths, jobs } => translate::precompile(paths, jobs),
+        #[cfg(windows)]
+        Command::SmoothMotion { what } => smooth_motion::run(&what),
+        #[cfg(windows)]
+        Command::UpscalerCheck { output, device, present } => {
+            let size = output
+                .split_once(['x', 'X'])
+                .and_then(|(w, h)| Some([w.trim().parse().ok()?, h.trim().parse().ok()?]))
+                .ok_or_else(|| anyhow::anyhow!("--output {output}: not <width>x<height>"))?;
+            for line in victory_hle::streamline::check(size, device || present, present) {
+                println!("{line}");
+            }
+            Ok(())
+        }
         #[cfg(windows)]
         Command::Warm { jobs, limit, again, used, these } => warm::run(jobs, limit, again, used, these),
         Command::Run {

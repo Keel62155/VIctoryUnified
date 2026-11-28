@@ -72,3 +72,59 @@ pub fn record(list: *const c_void, f: impl FnOnce(&mut Pass)) -> bool {
         state.replay(host); // (cool_fox port) sets again what a new host list would need
     })
 }
+
+// (Ported from shuffl3r/victory-nvidia, from DexNom's fork, GPL-3.0-or-later: what
+// `crate::streamline` needs to record DLSS into a title list.)
+
+/// A title texture's host copy, moved to the host resource `state` in
+/// `list`, and the state it is in: `state` without the bits the host copy
+/// cannot take (see `host::legal_state`). `None` for a buffer.
+#[cfg(windows)]
+pub(crate) fn host_texture(
+    list: &crate::host::HostList,
+    resource: This,
+    state: u32,
+) -> Option<(windows::Win32::Graphics::Direct3D12::ID3D12Resource, u32)> {
+    let texture = crate::resource::host_resource(resource)?.clone();
+    crate::list::ensure_state(list, resource, state);
+    let state = crate::host::legal_state(&texture, state);
+    Some((texture, state))
+}
+
+/// Prepares a title-authored input with the alias, upload and depth twin
+/// rules a compute shader's resource view has in the renderer.
+#[cfg(windows)]
+pub(crate) fn prepare_input(list: &crate::host::HostList, resource: This) -> Option<()> {
+    let texture = crate::resource::host_resource(resource)?;
+    let aliased = crate::resource::alias_of(resource).is_some_and(|source| crate::texture::alias(list, resource, source));
+    if !aliased && crate::texture::title_written(texture) {
+        crate::texture::upload_from(list, resource, 0);
+    }
+    list.twin_use(resource, false, false);
+    Some(())
+}
+
+/// The library wrote `resource` on the host: its contents are there, not in
+/// title memory.
+#[cfg(windows)]
+pub(crate) fn output_written(resource: This) {
+    crate::texture::host_written(resource);
+}
+
+/// Sends what the title submitted (the line of submissions first) and
+/// settles it, before a library lets go of resources the GPU may still use.
+#[cfg(windows)]
+pub(crate) fn finish_submitted() {
+    crate::queue::before_sync();
+    crate::host::settle_for_fence();
+}
+
+impl Pass<'_> {
+    /// Frame generation (`crate::streamline`): the depth and motion vectors
+    /// of the upscaling the title records here, noted for the present after
+    /// this list's submission.
+    #[cfg(windows)]
+    pub fn note_framegen(&self, up: &crate::streamline::Upscale) {
+        crate::streamline::note_on(self.list, up);
+    }
+}

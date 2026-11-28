@@ -76,3 +76,26 @@
 *.swp
 Thumbs.db
 .DS_Store
+
+# Local launcher settings, saves, optional runtime downloads and diagnostics
+/launcher-settings.toml
+/game-folder.txt
+/bin/
+/dist/
+/fsr/
+/dlss/
+/streamline/
+/logs/
+/save-backups/
+/captures/
+/benchmarks/
+/shader-cache/
+*.log
+*.profraw
+*.profdata
+*.etl
+*.dmp
+*.tmp
+*.bak
+.env
+.env.*

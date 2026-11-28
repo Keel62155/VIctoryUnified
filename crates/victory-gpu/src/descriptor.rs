@@ -755,6 +755,28 @@ pub(crate) fn constant_slot(
     }
 }
 
+/// Diagnostics (`VICTORY_SLOT_ORDER_COUNT=1`): of the slots `slots` (heap,
+/// index), those whose title record changed after note `since`
+/// (`host::recorded_so_far`): by the heaps' records or a texture's wait, and
+/// by a draw's table; and those whose record changed at all while notes were
+/// made.
+#[cfg(feature = "diagnostics")]
+pub(crate) fn slots_recorded_since(slots: &[(usize, u32)], since: u64) -> [u64; 3] {
+    let heaps = SHADER_HEAPS.read().unwrap_or_else(|e| e.into_inner());
+    let mut found = [0u64; 3];
+    for &(_, _, heap) in heaps.iter() {
+        // SAFETY: registered heaps are live (removed when dropped).
+        let Some(Some(host)) = unsafe { &*(heap as *const Heap) }.host.get() else {
+            continue;
+        };
+        let more = host.recorded_since(slots.iter().filter(|s| s.0 == heap).map(|s| s.1), since);
+        for (sum, n) in found.iter_mut().zip(more) {
+            *sum += n;
+        }
+    }
+    found
+}
+
 #[cfg(windows)]
 impl Drop for Heap {
     fn drop(&mut self) {

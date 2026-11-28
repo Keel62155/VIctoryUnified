@@ -77,6 +77,10 @@ mod sampler;
 #[cfg(windows)]
 pub mod shader_cache;
 #[cfg(windows)]
+pub mod streamline;
+#[cfg(windows)]
+pub use cores::title_affinity;
+#[cfg(windows)]
 mod memory;
 #[cfg(windows)]
 mod shadow;

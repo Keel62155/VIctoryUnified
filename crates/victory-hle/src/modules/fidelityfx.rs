@@ -59,8 +59,97 @@ const ERROR_PARAMETER: u32 = 6;
 // Description types (`ffx_api_types.h`, `ffx_api_dx12.h`, `ffx_upscale.h`).
 const DESC_OVERRIDE_VERSION: u64 = 0x1;
 const CREATE_BACKEND_DX12: u64 = 0x2;
+const CREATE_UPSCALE: u64 = 0x1_0000;
 const DISPATCH_UPSCALE: u64 = 0x1_0001;
 const DISPATCH_GENERATE_REACTIVE_MASK: u64 = 0x1_0002;
+
+// (From shuffl3r/victory-nvidia, GPL-3.0-or-later: the upscaler's descriptions,
+// for DLSS Frame Generation through Streamline, `victory_gpu::streamline`.)
+
+/// An upscaler's creation: flags and largest sizes.
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+struct CreateUpscale {
+    kind: u64,
+    next: *mut u8,
+    flags: u32,
+    max_render: [u32; 2],
+    max_output: [u32; 2],
+    message: usize,
+}
+
+/// A resource, its description (type, format, sizes, mips, flags, usage)
+/// and the state it is in.
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+struct Resource {
+    resource: *mut c_void,
+    description: [u32; 8],
+    state: u32,
+}
+
+/// One upscaling: the command list, then colour, depth, motion vectors,
+/// exposure, reactive mask, transparency and composition mask, output; then
+/// jitter, motion-vector scale, sizes, sharpening, frame time, exposure,
+/// reset, camera and flags. (The C `bool`s are read as bytes.)
+#[repr(C)]
+#[derive(Clone, Copy, Debug)]
+struct DispatchUpscale {
+    kind: u64,
+    next: *mut u8,
+    list: *mut c_void,
+    resources: [Resource; 7],
+    jitter: [f32; 2],
+    motion_scale: [f32; 2],
+    render_size: [u32; 2],
+    upscale_size: [u32; 2],
+    enable_sharpening: u8,
+    sharpness: f32,
+    frame_time_delta: f32,
+    pre_exposure: f32,
+    reset: u8,
+    camera_near: f32,
+    camera_far: f32,
+    camera_fov_angle_vertical: f32,
+    view_space_to_meters_factor: f32,
+    flags: u32,
+}
+
+const _: () = assert!(size_of::<CreateUpscale>() == 0x30);
+const _: () = assert!(size_of::<Resource>() == 0x30);
+const _: () = assert!(size_of::<DispatchUpscale>() == 0x1b0);
+
+/// The upscaler contexts the title made: creation flags and largest output.
+static CONTEXTS: Mutex<Vec<(usize, u32, [u32; 2])>> = Mutex::new(Vec::new());
+
+fn created(context: usize) -> Option<(u32, [u32; 2])> {
+    let contexts = CONTEXTS.lock().unwrap_or_else(|e| e.into_inner());
+    contexts.iter().find(|c| c.0 == context).map(|c| (c.1, c.2))
+}
+
+/// An upscaling in `victory_gpu::streamline`'s terms (title objects, before
+/// the description is patched with host ones).
+fn upscale_of(d: &DispatchUpscale, flags: u32, max_output: [u32; 2], context: usize) -> victory_gpu::streamline::Upscale {
+    let output = if d.upscale_size == [0, 0] { max_output } else { d.upscale_size };
+    victory_gpu::streamline::Upscale {
+        context,
+        list: d.list.cast::<victory_gpu::object::Object>().cast_const(),
+        resources: d.resources.map(|r| (r.resource.cast::<victory_gpu::object::Object>().cast_const(), r.state)),
+        camera: victory_gpu::streamline::plan::Camera {
+            jitter: d.jitter,
+            motion_scale: d.motion_scale,
+            render: d.render_size,
+            output,
+            near: d.camera_near,
+            far: d.camera_far,
+            fov_y: d.camera_fov_angle_vertical,
+            reset: d.reset != 0,
+            flags,
+        },
+        pre_exposure: d.pre_exposure,
+        frame_ms: d.frame_time_delta,
+    }
+}
 
 type Create = unsafe extern "system" fn(*mut *mut c_void, *mut u8, *const c_void) -> u32;
 type Destroy = unsafe extern "system" fn(*mut *mut c_void, *const c_void) -> u32;
@@ -243,12 +332,28 @@ extern "system" fn ffxCreateContext(context: *mut *mut c_void, desc: *mut u8, _a
     // we patched.
     let code = unsafe { (api.create)(context, desc, std::ptr::null()) };
     drop(patches);
+    // An upscaler: its flags and sizes, for frame generation's constants.
+    // SAFETY: a description: its type first; an upscaler's by that type.
+    if code == OK && !context.is_null() && unsafe { desc.cast::<u64>().read_unaligned() } == CREATE_UPSCALE {
+        let c = unsafe { desc.cast::<CreateUpscale>().read_unaligned() };
+        let handle = unsafe { *context } as usize;
+        let mut contexts = CONTEXTS.lock().unwrap_or_else(|e| e.into_inner());
+        contexts.retain(|x| x.0 != handle);
+        contexts.push((handle, c.flags, c.max_output));
+        tracing::info!(flags = format_args!("{:#x}", c.flags), max_render = ?c.max_render, max_output = ?c.max_output, "FidelityFX: the title made its upscaler");
+    }
     tracing::info!(code, "ffxCreateContext on the host DLL");
     code
 }
 
 extern "system" fn ffxDestroyContext(context: *mut *mut c_void, _alloc: *const c_void) -> u32 {
     let Some(api) = api() else { return ERROR };
+    if !context.is_null() {
+        // SAFETY: the title's context.
+        let handle = unsafe { *context } as usize;
+        CONTEXTS.lock().unwrap_or_else(|e| e.into_inner()).retain(|x| x.0 != handle);
+        victory_gpu::streamline::upscaler_destroyed(handle);
+    }
     // SAFETY: the PC DLL's export.
     unsafe { (api.destroy)(context, std::ptr::null()) }
 }
@@ -349,9 +454,23 @@ extern "system" fn ffxDispatch(context: *mut *mut c_void, desc: *mut u8) -> u32 
     };
     // SAFETY: the command list's word of a dispatch description.
     let list = unsafe { desc.add(COMMAND_LIST).cast::<usize>().read_unaligned() };
+    // DLSS Frame Generation (`VICTORY_FRAMEGEN=1`): the upscaling's depth,
+    // motion vectors and camera, read before the description is patched.
+    let framegen = (ty == DISPATCH_UPSCALE && !context.is_null())
+        .then(|| {
+            // SAFETY: the title's context and an upscaling, by its type.
+            let handle = unsafe { *context } as usize;
+            let (flags, max_output) = created(handle)?;
+            let d = unsafe { desc.cast::<DispatchUpscale>().read_unaligned() };
+            Some(upscale_of(&d, flags, max_output, handle))
+        })
+        .flatten();
     let mut code = ERROR;
     let mut patches = Patches::default();
     let recorded = external::record(list as *const c_void, |pass| {
+        if let Some(up) = &framegen {
+            pass.note_framegen(up);
+        }
         // SAFETY: the words of a dispatch description the title passed,
         // aligned as the C structures are.
         unsafe {
