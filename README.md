@@ -1,138 +1,402 @@
-# VIctoryUnified Renderer Preview
+# VIctoryUnified
 
-The updated Windows launcher starts from `VIctoryUnified.exe` with `victory.exe` beside it. It stores the preview profile, saves, logs and cache under `%LOCALAPPDATA%/VIctoryUnified/renderer-preview`. Choose your own game folder in the launcher. Select NVIDIA DLSS (native), DLSS Performance, and native 2× with startup FG enabled for the RTX 4060 trial.
+**An enhanced, performance-focused fork of VIctory for Windows, combining renderer optimizations, improved NVIDIA compatibility, native DLSS Frame Generation and features from multiple community projects.**
 
-Press F1 for settings, F3 for performance, and F4 for the optional trainer when installed and enabled. The F1 VSync option applies immediately. Shader warming uses six workers.
+VIctoryUnified is an experimental Xbox Series X|S compatibility layer designed to run Grand Theft Auto VI on Windows using game files supplied by the user.
 
-[Build instructions](BUILD.md) · [Settings](docs/renderer-settings.md) · [Progress and validation](PROGRESS.md) · [Third-party notices](THIRD_PARTY.md)
+The project focuses on improving real gameplay performance, reducing memory consumption, minimizing open-world stuttering and providing an accessible experience through a dedicated graphical launcher and in-game settings.
+
+**[Download Latest Release](https://github.com/Keel62155/VIctoryUnified/releases/latest) • [Report an Issue](https://github.com/Keel62155/VIctoryUnified/issues) • [Build Instructions](BUILD.md) • [VctoryTrainer](https://github.com/Keel62155/VctoryTrainer)**
 
 ---
 
-# VIctory on an RX 7900 XTX
+## Features
 
-## Run the codec_d Windows build
+### Graphics & Rendering
 
-Download and extract the Windows x64 ZIP from the [private releases](https://github.com/codec-d/cool_fox/releases/latest). Open PowerShell in the extracted folder and point the launcher at your own complete Xbox dump.
+- Native NVIDIA DLSS upscaling.
+- Native NVIDIA DLSS Frame Generation through Streamline.
+- Multiple DLSS quality modes and model presets.
+- AMD FidelityFX Super Resolution (FSR).
+- Xbox Series X and Series S rendering profiles.
+- Adjustable rendering resolution.
+- Configurable lighting, reflections, fog and water effects.
+- Optional ray tracing.
+- Configurable VSync and frame-rate limits.
+- Fullscreen support.
 
-```powershell
-$env:VICTORY_GAME_DIR = 'D:\Games\MyDump'
-.\Play-VIctory.cmd pareto-residency
-```
+### Performance
 
-The launcher selects Series S and the RTX-tested residency settings. It builds its shader cache locally under `%LOCALAPPDATA%\VIctory\cache-pareto`. Set `VICTORY_CACHE_DIR` to reuse an existing cache outside the checkout. Windows x64, an AVX2 CPU, and a Direct3D 12 GPU with shader model 6.6 and mesh shader support are required.
+- Optimizations targeting NVIDIA GPUs, particularly cards with 8GB of VRAM.
+- Improved CPU and GPU synchronization.
+- Asynchronous command submission.
+- Multithreaded graphics command translation.
+- Improved descriptor synchronization.
+- Optimized memory-transfer operations.
+- Texture streaming and residency improvements.
+- Shader translation and pipeline caching.
+- Configurable CPU worker pools.
+- Resizable BAR support.
+- Experimental CPU scheduling optimizations.
+- Shader cache warming using six workers.
 
-To build from this checkout, install the pinned Rust toolchain and the MSVC C++ build tools with a Windows SDK, then run `cargo build --release --locked -p victory`. The same launcher finds `target\release\victory.exe`. The sections below describe the upstream AMD fork and its separate launcher.
+### Graphical Launcher
 
-A fork of [VIctory](https://github.com/Marvisak/VIctory), a compatibility layer
-that runs an Xbox Series title natively on Windows from files the user supplies.
-This one is about **speed on AMD RDNA 3**: the world at 30 frames a second on
-one PC, without giving up the picture. It is not there yet.
+VIctoryUnified includes a dedicated graphical launcher designed to simplify installation, configuration and gameplay.
 
-**This repository contains no game files, code or assets.** You need your own
-copy of the game. It is not affiliated with or endorsed by the game's developer
-or publisher.
+- Automatic game directory validation.
+- Max Performance, Balanced, Quality and Custom profiles.
+- Graphics and performance configuration.
+- Persistent user settings.
+- Dependency management.
+- Shader cache management.
+- Save importing and management.
+- Access to runtime logs.
+- Advanced launch switches.
 
-## Where it stands (2026-11-25)
+### In-Game Settings
 
-Tested on one machine only: Windows 11, Intel i9-12900K, 64 GB RAM, Radeon
-RX 7900 XTX, 1440p, the Series X profile.
+Press **F1** to open the in-game settings menu.
 
-| | |
+Configure DLSS, Frame Generation, rendering profiles, graphical effects, memory management and advanced performance options without manually editing launch scripts.
+
+Some settings apply immediately, while others require restarting the game.
+
+### Performance Overlay
+
+Press **F3** to display detailed performance statistics, including:
+
+- Real FPS.
+- Frame-generated FPS.
+- Frame times.
+- CPU submission performance.
+- GPU processing and waiting times.
+- Draw calls.
+- Memory transfers.
+- Dedicated and shared GPU memory usage.
+- System RAM usage.
+
+### Single-Player Modding
+
+VIctoryUnified supports optional ScriptHook VI integration through VctoryTrainer.
+
+When installed and enabled, press **F4** to access the in-game trainer.
+
+- Single-player Story Mode support.
+- Native game function invocation.
+- In-game trainer interface.
+- No external DLL injector required.
+- Original game files remain untouched.
+
+Learn more at the [VctoryTrainer repository](https://github.com/Keel62155/VctoryTrainer).
+
+---
+
+## System Requirements
+
+VIctoryUnified is still under active development. Performance and compatibility may vary considerably between hardware configurations.
+
+| Component | Requirement |
 |---|---|
-| Menus, videos, loading screens | 30 fps |
-| Prologue, indoors | 50-75 ms a frame (13-20 fps) |
-| First mission with the boat | 46-53 ms (19-22 fps) |
-| Street chase with many cars and people | 100-165 ms (6-10 fps), single frames far longer |
-| Outdoors on foot, the camp | 60-90 ms |
-| Flying | 42-57 ms |
-| Longest session so far | 41 minutes, no crash |
-| Memory | 40-46 GB of private memory: **64 GB of RAM recommended** |
+| Operating System | Windows 10/11 x64 |
+| Processor | x86-64 CPU with AVX2 support |
+| Graphics API | DirectX 12 |
+| GPU Features | Shader Model 6.6 and mesh shader support |
+| Graphics Memory | 8GB or more recommended |
+| System Memory | 32GB or more recommended |
+| Storage | SSD strongly recommended |
+| Resizable BAR | Recommended |
+| Game Files | Your own complete, compatible Xbox Series game files |
 
-It started at 280 ms a frame in the same scenes two days earlier.
+### Primary Development Hardware
 
-What is known to be wrong:
+VIctoryUnified is primarily developed and tested on the following system:
 
-- Trees, plants and far buildings flicker outdoors in some places.
-- Rooms with little direct light are too dark without `-RayTracing`.
-- Textures of what just came into view appear late while the title streams.
-- The first run with a new driver or a new build stutters while the driver makes
-  pipelines (`victory warm` makes them ahead).
-- Recording a frame in the world makes the title's own watchdog end it.
+| Component | Specification |
+|---|---|
+| CPU | Intel Core i7-14700F |
+| GPU | NVIDIA GeForce RTX 4060 8GB |
+| RAM | 32GB |
+| Operating System | Windows 11 |
+| Resizable BAR | Enabled |
 
-## How to run it
+Higher-end hardware may provide better performance, but the project aims to improve accessibility for users with mid-range systems.
 
-You need Windows 10/11 x64, a CPU with AVX2, a Direct3D 12 GPU with shader
-model 6.6 and mesh shaders, Rust (the toolchain is pinned), the MSVC build
-tools, and your own dump of the title.
+---
 
-```powershell
-git clone https://github.com/avatarmanz/VIctory-7900XTX
-cd VIctory-7900XTX
-copy victory.example.toml victory.toml      # then set your paths, outside this folder
-cargo build --locked --profile diag -p victory --features diagnostics
-scripts\play.ps1 -Exe <path of your copy's executable>
+## Installation
+
+### Precompiled Release
+
+1. Download the latest Windows x64 release from the [Releases page](https://github.com/Keel62155/VIctoryUnified/releases).
+2. Extract the ZIP into a folder of your choice.
+3. Keep `VIctoryUnified.exe` and `victory.exe` together.
+4. Open `VIctoryUnified.exe`.
+5. Select your compatible game directory.
+6. Choose your preferred graphics and performance settings.
+7. Press **PLAY**.
+
+The first launch may take longer because shaders and graphics pipelines need to be prepared.
+
+Do not interrupt shader preparation unnecessarily.
+
+### Recommended Starting Settings
+
+For NVIDIA GPUs with 8GB of VRAM:
+
+| Setting | Recommended |
+|---|---|
+| Performance Preset | Max Performance |
+| Console Profile | Xbox Series S |
+| Upscaling | NVIDIA DLSS or FSR |
+| DLSS Quality | Performance |
+| Frame Generation | Off initially |
+| Ray Tracing | Off |
+| Resizable BAR | Enabled |
+| Shader Cache | Fully prepared |
+
+Once the game is running reliably, experiment with native 2× DLSS Frame Generation on supported hardware.
+
+Frame Generation improves displayed smoothness but does not increase the underlying game simulation rate.
+
+---
+
+## Keyboard Shortcuts
+
+| Key | Function |
+|---|---|
+| F1 | In-game settings menu |
+| F3 | Performance overlay |
+| F4 | Optional VctoryTrainer menu |
+
+Additional input configuration may be available through the launcher and `bindings.ini`.
+
+---
+
+## Building From Source
+
+### Requirements
+
+- Rust using the pinned repository toolchain.
+- Microsoft Visual Studio C++ Build Tools.
+- Windows SDK.
+- Git.
+
+Clone the repository:
+
+```bash
+git clone https://github.com/Keel62155/VIctoryUnified.git
+cd VIctoryUnified
 ```
 
-`scripts\play.ps1 -Safe` leaves out the newest, faster ways; try it first when
-something is wrong. `-RayTracing` turns the title's ray-traced indirect light on.
+Build the runtime:
 
-Before the first run, ahead of time (both can be stopped and go on later):
-
-```powershell
-target\diag\victory.exe shaders <the shader archives>   # every shader translated, minutes
-target\diag\victory.exe warm --used                     # pipelines earlier runs drew with, for a new driver or build
+```bash
+cargo build --release --locked -p victory
 ```
 
-Commands, debugging switches and upstream's own description:
-[docs/README-fxceless.md](docs/README-fxceless.md). Every `VICTORY_...` switch is
-described in a comment where it is read.
+The compiled runtime will be available at:
 
-## What is different here
+```text
+target/release/victory.exe
+```
 
-In short; the reasons and the measurements are in [docs/findings.md](docs/findings.md).
+For graphical launcher compilation, dependency setup and release packaging, refer to [BUILD.md](BUILD.md).
 
-- **List calls are written down, not carried out, on the title's threads**
-  (`VICTORY_THIN`): eight threads of ours translate them.
-- **Submissions are prepared by a thread of ours and joined**
-  (`VICTORY_ASYNC_SUBMIT`, `VICTORY_JOIN_PARTS`), with what can be spread over
-  threads spread: refreshes, compares (AVX2), descriptor records, landings.
-- **What shaders wrote comes back beside the write guards**, by the dwords that
-  changed, on a thread of its own (`VICTORY_RELAY`, `VICTORY_LAND`).
-- **Buffer fills that need bytes still on the card are done on the card**
-  (`VICTORY_CARD_STEPS`) instead of waiting for it.
-- **The title's writes are caught more cheaply**: one view opened at a fault,
-  blocks that rest, places in the title's code that look before they write.
-- **Textures go up on a copy queue of their own** and a slot shows one only after
-  its upload ran, which also ended a device loss that came every 15 minutes or so.
-- **Boats float**: textures that shaders write and the title's CPU reads go back
-  to title memory (from fxceless and Geckomacabre, on by default here).
-- **Frame record and replay** with per-pass times and shader variants compared
-  turn by turn ([docs/replay.md](docs/replay.md)).
+---
 
-## Credits
+## Advanced Configuration
 
-This is a tree of other people's work with more on top. The history is kept, and
-commits taken from elsewhere name the commit and its author.
+VIctoryUnified supports advanced configuration through `VICTORY_*` environment variables.
 
-- **[VIctory](https://github.com/Marvisak/VIctory)** by Marvisak and its
-  contributors: the loader, the runtime services, the Direct3D 12 back end and
-  the shader recompiler.
-- **[fxceless/victory-fork](https://github.com/fxceless/victory-fork)**: the fork
-  this one started from, and the people whose pull requests it carries.
-- **[DexNom/VIctory](https://github.com/DexNom/VIctory)**: ray tracing fixes,
-  cube gradients, sparse textures.
-- **[Belobug/VIctory-Belobug-AMD](https://github.com/Belobug/VIctory-Belobug-AMD)**:
-  the ambient light idea, pipeline workers, and work by romainhedouin.
-- **[FQY55kai/ZJOU-VICTORY](https://github.com/FQY55kai/ZJOU-VICTORY)**.
-- **[myokex/victory-amd](https://github.com/myokex/victory-amd)**: the guard over
-  every view of a page (with Spexivus, joroyt and tightfall), and Joshua Odom's
-  reads into title memory.
-- **Geckomacabre** and **cxy0072019-sketch**: the texture read-back.
-- **[XCL](https://github.com/ivall/xcl)** (GPL-2.0-only) was read for how the same
-  title behaves under another layer; no code of it is here.
-- This fork's changes were made with [Claude Code](https://claude.com/claude-code).
+Example performance configuration:
+
+```ini
+VICTORY_EARLY_DEPTH=1
+VICTORY_SYNC_FINE=1
+VICTORY_SYNC_IN_PLACE=1
+VICTORY_TEXTURE_NO_WAIT=1
+VICTORY_TEXTURE_POOL=1
+VICTORY_RELAY=2
+VICTORY_RELAY_COPY=1
+```
+
+Advanced settings may affect performance, rendering correctness and stability.
+
+Not every configuration is appropriate for every hardware combination. Always test experimental settings before using them permanently.
+
+See the [documentation](docs/) and [example configuration](victory.example.toml) for additional information.
+
+---
+
+## Current Development Goals
+
+The primary goal of VIctoryUnified is to improve actual gameplay performance rather than simply achieve higher FPS in menus or stationary scenes.
+
+- [x] Graphical Windows launcher.
+- [x] NVIDIA DLSS integration.
+- [x] Native DLSS Frame Generation integration.
+- [x] In-game settings menu.
+- [x] Detailed performance overlay.
+- [x] Optional ScriptHook VI trainer integration.
+- [ ] Sustained 20–25 real FPS during demanding free roam.
+- [ ] Improved performance while driving through populated areas.
+- [ ] Significantly reduced open-world stuttering.
+- [ ] Further VRAM and system memory reductions.
+- [ ] Improved CPU/GPU memory coherence.
+- [ ] More efficient demand-driven memory synchronization.
+- [ ] Improved graphical accuracy.
+- [ ] Expanded hardware compatibility.
+
+Development progress and technical findings are documented in [PROGRESS.md](PROGRESS.md).
+
+---
+
+## Known Issues
+
+VIctoryUnified is experimental software and should not be considered a finished compatibility solution.
+
+Current limitations may include:
+
+- Significant FPS drops in demanding open-world locations.
+- Texture streaming delays.
+- Shader and pipeline compilation stutters.
+- Occasional graphical artifacts.
+- High system RAM and GPU memory consumption.
+- Experimental settings causing instability or graphical corruption.
+- Frame Generation behavior varying with hardware, window focus and presentation mode.
+- Incomplete compatibility with some hardware configurations.
+
+A high displayed FPS with Frame Generation enabled does not necessarily indicate high real gameplay performance.
+
+---
+
+## Troubleshooting
+
+If you experience crashes, missing textures or severe performance problems:
+
+- Try the default or Max Performance preset.
+- Disable Frame Generation.
+- Disable experimental rendering options.
+- Use the Series S profile.
+- Verify that your GPU drivers are up to date.
+- Allow shader preparation to finish.
+- Check available system RAM and VRAM.
+- Close unnecessary background applications.
+- Review the runtime logs.
+
+When reporting an issue, please include:
+
+- CPU and GPU.
+- System RAM and VRAM.
+- Windows version.
+- GPU driver version.
+- VIctoryUnified version.
+- Console and rendering profile.
+- Relevant launch settings.
+- Runtime logs.
+- A description of the problem and how to reproduce it.
+
+Do not upload game files, personal saves or sensitive information.
+
+[Report an issue here](https://github.com/Keel62155/VIctoryUnified/issues).
+
+---
+
+## Contributing
+
+Contributions, performance research, bug reports and compatibility testing are welcome.
+
+Areas where contributions are particularly appreciated:
+
+- CPU and GPU performance.
+- Xbox unified memory emulation.
+- Texture streaming.
+- Shader translation.
+- DirectX 12 rendering.
+- Memory synchronization.
+- NVIDIA and AMD compatibility.
+- Frame pacing and stuttering.
+- Launcher improvements.
+- Documentation.
+
+Please ensure that contributions respect the project's licensing requirements and do not contain proprietary game code, restricted SDK files or copyrighted game assets.
+
+Performance-related pull requests should include reproducible benchmark results wherever possible.
+
+---
+
+## Credits & Acknowledgements
+
+VIctoryUnified builds upon the work of numerous developers and community projects. This project would not exist without their contributions.
+
+### Project Development
+
+**[Keel62155](https://github.com/Keel62155)**
+
+VIctoryUnified development, integration, hardware testing, packaging and maintenance.
+
+### Upstream Projects & Contributors
+
+- **[Marvisak — VIctory](https://github.com/Marvisak/VIctory)** — Original compatibility layer, runtime services, graphics backend and shader recompilation.
+- **codec_d — cool_fox** — Renderer and performance optimization work.
+- **[trustno1-coder — VIctory-NVIDIA](https://github.com/trustno1-coder/VIctory-NVIDIA)** — NVIDIA renderer improvements, DLSS, Frame Generation and in-game settings.
+- **[avatarmanz — VIctory-7900XTX](https://github.com/avatarmanz/VIctory-7900XTX)** — AMD renderer and memory-management optimizations.
+- **[fxceless — victory-fork](https://github.com/fxceless/victory-fork)** — Renderer, synchronization and performance improvements.
+- **[DexNom — VIctory](https://github.com/DexNom/VIctory)** — Rendering fixes, ray tracing and sparse texture research.
+- **[Biskwit — VIctory-reloaded](https://github.com/Biskwit/VIctory-reloaded)** — CPU scheduling and command submission research.
+- **[shuffl3r — victory-nvidia](https://github.com/shuffl3r/victory-nvidia)** — NVIDIA Streamline integration research.
+- **Belobug and romainhedouin** — Ambient lighting and pipeline worker improvements.
+- **FQY55kai — ZJOU-VICTORY** — Upstream compatibility and optimization work.
+- **myokex, Spexivus, joroyt, tightfall and Joshua Odom** — Memory guards and title memory research.
+- **Geckomacabre and cxy0072019-sketch** — Texture readback improvements.
+
+### Modding & Trainer Development
+
+- **[modpapi — ScriptHook VI](https://github.com/modpapi/scripthook-vi)** — Original script hook, native function research and trainer implementation.
+- **[NitricAcidDev — VIctory-Omega-Fork](https://github.com/NitricAcidDev/VIctory-Omega-Fork)** — ScriptHook VI host integration reference.
+- **Anh** — Special thanks for helping discover ScriptHook VI and pointing the project in the right direction.
+
+### Additional Acknowledgements
+
+Thank you to NVIDIA, AMD and the open-source graphics development community for their publicly available technologies, documentation and development tools.
+
+Thank you to everyone who has tested VIctoryUnified, reported bugs, shared performance research or contributed to the wider VIctory community.
+
+Development has been assisted by Claude Code and OpenAI Codex.
+
+See [THIRD_PARTY.md](THIRD_PARTY.md) for additional attribution and licensing information.
+
+---
 
 ## License
 
-GPL-3.0-or-later, as VIctory. See [LICENSE](LICENSE); the one file that is not
-covered is named in [docs/asset-policy.md](docs/asset-policy.md).
+VIctoryUnified is distributed under the **GNU General Public License v3.0 or later**, consistent with the upstream VIctory project.
+
+See [LICENSE](LICENSE) for details.
+
+Third-party components remain subject to their respective licenses and distribution terms. NVIDIA Streamline licensing information is available in [LICENSE-Streamline.txt](LICENSE-Streamline.txt).
+
+Proprietary runtime dependencies and separately licensed modding components must be obtained independently where required.
+
+---
+
+## Disclaimer
+
+VIctoryUnified is an independent, experimental compatibility project.
+
+It is not affiliated with, endorsed by or sponsored by Rockstar Games, Take-Two Interactive, Microsoft, NVIDIA or AMD.
+
+This repository does not distribute game files, game executables, copyrighted game assets or restricted proprietary SDKs.
+
+Users must provide their own legally obtained, compatible game files.
+
+Optional trainer functionality is intended exclusively for offline, single-player gameplay.
+
+Use this software at your own risk and always back up your saves.
+
+---
+
+**VIctoryUnified — Bringing the best of VIctory together.**
+
+If you enjoy the project, consider leaving a star on GitHub!
