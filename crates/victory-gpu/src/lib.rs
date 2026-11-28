@@ -82,6 +82,16 @@ pub mod streamline;
 pub mod save_share;
 #[cfg(windows)]
 pub static SETTINGS_MENU_OPEN: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
+/// Ask the window thread to refresh cursor confinement after a settings change.
+#[cfg(windows)]
+pub const REFRESH_MOUSE_CAPTURE: u32 = windows_sys::Win32::UI::WindowsAndMessaging::WM_APP + 1;
+
+#[cfg(windows)]
+pub fn mouse_capture_enabled() -> bool {
+    std::env::var_os("VICTORY_MOUSE_CAPTURE").is_some_and(|value| value == "1")
+        && !SETTINGS_MENU_OPEN.load(std::sync::atomic::Ordering::Relaxed)
+}
+
 #[cfg(windows)]
 pub static MNK_BINDINGS_CHANGED: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(0);
 #[cfg(windows)]

@@ -143,15 +143,13 @@ fn english_input() {
 #[derive(Default)]
 struct MouseCapture {
     window: usize,
-    center: (i32, i32),
-    reference: Option<(i32, i32)>,
     hidden: i32,
 }
 static MOUSE_CAPTURE: std::sync::LazyLock<Mutex<MouseCapture>> =
     std::sync::LazyLock::new(|| Mutex::new(MouseCapture::default()));
 
 fn capture_mouse(hwnd: HWND, active: bool) {
-    if !enabled("VICTORY_MOUSE_CAPTURE") { return; }
+    let active = active && victory_gpu::mouse_capture_enabled() && !super::gameinput::mnk::enabled();
     let mut state = MOUSE_CAPTURE.lock().unwrap_or_else(|e| e.into_inner());
     // SAFETY: runs on the window thread; local geometry, balanced cursor count.
     unsafe {
@@ -169,7 +167,6 @@ fn capture_mouse(hwnd: HWND, active: bool) {
         let (mut area, mut origin) = (RECT::default(), POINT::default());
         if wm::GetClientRect(hwnd, &mut area) == 0 || ClientToScreen(hwnd, &mut origin) == 0
             || area.right <= 0 || area.bottom <= 0 { return; }
-        let center = (origin.x + area.right / 2, origin.y + area.bottom / 2);
         area.left += origin.x; area.right += origin.x;
         area.top += origin.y; area.bottom += origin.y;
         if wm::ClipCursor(&area) == 0 { return; }
@@ -177,9 +174,7 @@ fn capture_mouse(hwnd: HWND, active: bool) {
             state.hidden = 1 + (wm::ShowCursor(0) + 1).max(0);
             for _ in 1..state.hidden { wm::ShowCursor(0); }
         }
-        if state.center != center { state.reference = None; }
         state.window = hwnd as usize;
-        state.center = center;
     }
 }
 
@@ -356,12 +351,14 @@ extern "system" fn window_proc(
     if message == wm::WM_SYSCOMMAND && wparam & 0xFFF0 == wm::SC_KEYMENU as usize {
         return 0;
     }
-    if !super::gameinput::mnk::enabled() {
-        match message {
-            wm::WM_ACTIVATE => capture_mouse(hwnd, wparam & 0xffff != wm::WA_INACTIVE as usize),
-            wm::WM_KILLFOCUS | wm::WM_NCDESTROY => capture_mouse(hwnd, false),
-            _ => {}
+    match message {
+        victory_gpu::REFRESH_MOUSE_CAPTURE => {
+            capture_mouse(hwnd, true);
+            return 0;
         }
+        wm::WM_ACTIVATE => capture_mouse(hwnd, wparam & 0xffff != wm::WA_INACTIVE as usize),
+        wm::WM_KILLFOCUS | wm::WM_NCDESTROY => capture_mouse(hwnd, false),
+        _ => {}
     }
     // SAFETY: the procedure `hook` stored, called the way the system would.
     unsafe {

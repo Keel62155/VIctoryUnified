@@ -16,7 +16,7 @@ Open F1 with the keyboard or press Menu + View together on the first XInput cont
 | `VICTORY_PANEL` | Stats panel (f3) | `0`, `1` | 0 | Live |
 | `VICTORY_VSYNC` | Vsync | `0`, `1` | 0 | Live |
 | `VICTORY_FULLSCREEN` | Fullscreen (no border) | empty, 1 | engine or launcher preset | Restart |
-| `VICTORY_MOUSE_CAPTURE` | Mouse capture | empty, 1 | engine or launcher preset | Restart |
+| `VICTORY_MOUSE_CAPTURE` | Mouse capture | empty or 0: free cursor, 1: capture | engine or launcher preset | Live (outside F1) |
 | `VICTORY_MNK` | Mouse and keyboard | empty, 1 | engine or launcher preset | Restart |
 | `VICTORY_IME_ENGLISH` | English keyboard | empty, 1 | engine or launcher preset | Restart |
 | `VICTORY_MENU_CONSOLE` | Console | `series-x`, `series-s` | series-x | Restart |

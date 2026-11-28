@@ -173,7 +173,7 @@ const ITEMS: &[Item] = &[
     Item { var: "VICTORY_PANEL", label: "STATS PANEL (F3)", values: &[("0", "OFF"), ("1", "ON")], live: true },
     Item { var: "VICTORY_VSYNC", label: "VSYNC", values: &[("0", "OFF"), ("1", "ON")], live: true },
     Item { var: "VICTORY_FULLSCREEN", label: "FULLSCREEN (NO BORDER)", values: UNSET_ON, live: false },
-    Item { var: "VICTORY_MOUSE_CAPTURE", label: "MOUSE CAPTURE", values: UNSET_ON, live: false },
+    Item { var: "VICTORY_MOUSE_CAPTURE", label: "MOUSE CAPTURE", values: &[("0", "OFF"), ("1", "ON")], live: true },
     // Keys and sensitivity in bindings.ini in %LOCALAPPDATA%\victory (apps\victory\src\play.rs).
     Item { var: "VICTORY_MNK", label: "MOUSE AND KEYBOARD", values: UNSET_ON, live: false },
     Item { var: "VICTORY_IME_ENGLISH", label: "ENGLISH KEYBOARD", values: UNSET_ON, live: false },
@@ -533,7 +533,14 @@ impl Menu {
         if std::env::var_os("VICTORY_MENU_OPEN").is_some_and(|v| v == "1") {
             crate::SETTINGS_MENU_OPEN.store(true, Ordering::Relaxed);
         }
-        let values: Vec<String> = ITEMS.iter().map(|i| get(i.var)).collect();
+        let values: Vec<String> = ITEMS.iter().map(|i| {
+            let value = get(i.var);
+            if i.var == "VICTORY_MOUSE_CAPTURE" && value != "1" {
+                "0".to_owned()
+            } else {
+                value
+            }
+        }).collect();
         Menu { started: values.clone(), values, at: 0, note: String::new(), changed: true, painted: None, buffers: None, failed: false, imports: Vec::new(), import_at: 0, picking: false, binds: None }
     }
 
@@ -726,6 +733,17 @@ impl Menu {
         }
     }
 
+    fn refresh_mouse_capture() {
+        let hwnd = MENU_WINDOW.load(Ordering::Relaxed) as windows_sys::Win32::Foundation::HWND;
+        if !hwnd.is_null() {
+            unsafe {
+                windows_sys::Win32::UI::WindowsAndMessaging::PostMessageW(
+                    hwnd, crate::REFRESH_MOUSE_CAPTURE, 0, 0,
+                );
+            }
+        }
+    }
+
     /// A setting the build reads at each use: changed in this run's environment at once.
     fn apply_live(&self, i: usize) {
         let (var, value) = (ITEMS[i].var, &self.values[i]);
@@ -744,6 +762,7 @@ impl Menu {
             "VICTORY_MENU_FRAMEGEN" => crate::streamline::set_framegen(value.parse().unwrap_or(0)),
             "VICTORY_FPS_LINE" => fps_line_on().store(value != "0", Ordering::Relaxed),
             "VICTORY_VSYNC" => vsync().store(value == "1", Ordering::Relaxed),
+            "VICTORY_MOUSE_CAPTURE" => Self::refresh_mouse_capture(),
             "VICTORY_PANEL" => super::panel::shown().store(value == "1", Ordering::Relaxed),
             _ => {}
         }
@@ -926,7 +945,9 @@ impl Menu {
 
     /// A frame was presented: the keys pressed since the last one.
     pub(super) fn frame(&mut self, window: usize) {
-        MENU_WINDOW.store(window, Ordering::Relaxed);
+        if MENU_WINDOW.swap(window, Ordering::Relaxed) != window && Self::open() {
+            Self::refresh_mouse_capture();
+        }
         self.warmup();
         let pressed = std::mem::take(&mut *keys().lock().unwrap_or_else(|e| e.into_inner()));
         if pressed.is_empty() {
@@ -953,6 +974,7 @@ impl Menu {
             }
             if vk == VK_F1 || (open && vk == VK_ESCAPE) {
                 crate::SETTINGS_MENU_OPEN.store(!open && vk == VK_F1, Ordering::Relaxed);
+                Self::refresh_mouse_capture();
                 self.note.clear();
                 self.picking = false;
                 self.binds = None;
@@ -1043,7 +1065,10 @@ impl Menu {
                         }
                         None => BINDS_OFF.clone_into(&mut self.note),
                     },
-                    _ => crate::SETTINGS_MENU_OPEN.store(false, Ordering::Relaxed),
+                    _ => {
+                        crate::SETTINGS_MENU_OPEN.store(false, Ordering::Relaxed);
+                        Self::refresh_mouse_capture();
+                    }
                 },
                 _ => {}
             }

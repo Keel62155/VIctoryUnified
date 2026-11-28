@@ -153,7 +153,7 @@ struct Mouse {
     stick: [f32; 2],
     last: Option<Instant>,
     last_motion: Option<Instant>,
-    centered: bool,
+    reference: Option<(bool, [i32; 2])>,
 }
 fn mouse() -> std::sync::MutexGuard<'static, Mouse> {
     static STATE: OnceLock<Mutex<Mouse>> = OnceLock::new();
@@ -161,32 +161,51 @@ fn mouse() -> std::sync::MutexGuard<'static, Mouse> {
 }
 
 // Sample cursor displacement on the input polling thread, independently of frame delivery.
-fn recenter(hwnd: HWND) -> Option<[i32; 2]> {
+fn cursor_sample(hwnd: HWND, capture: bool) -> Option<([i32; 2], [i32; 2])> {
     let mut rect = RECT::default();
     let mut cursor = POINT::default();
     unsafe {
         if wm::GetClientRect(hwnd, &mut rect) == 0 || rect.right <= 0 || rect.bottom <= 0 {
             return None;
         }
-        let mut center = POINT {
-            x: rect.right / 2,
-            y: rect.bottom / 2,
-        };
-        if windows_sys::Win32::Graphics::Gdi::ClientToScreen(hwnd, &mut center) == 0
+        let mut origin = POINT::default();
+        if windows_sys::Win32::Graphics::Gdi::ClientToScreen(hwnd, &mut origin) == 0
             || wm::GetCursorPos(&mut cursor) == 0
             || wm::GetForegroundWindow() != hwnd
         {
             return None;
         }
-        let delta = [cursor.x - center.x, cursor.y - center.y];
-        if delta != [0, 0] && wm::SetCursorPos(center.x, center.y) == 0 {
-            return None;
+        let position = [cursor.x, cursor.y];
+        if capture {
+            let center = [origin.x + rect.right / 2, origin.y + rect.bottom / 2];
+            if position != center && wm::SetCursorPos(center[0], center[1]) == 0 {
+                return None;
+            }
+            return Some((position, center));
         }
-        Some(delta)
+        let inside = cursor.x >= origin.x && cursor.x < origin.x + rect.right
+            && cursor.y >= origin.y && cursor.y < origin.y + rect.bottom;
+        inside.then_some((position, position))
     }
 }
 
 impl Mouse {
+    fn displacement(&mut self, capture: bool, sample: Option<([i32; 2], [i32; 2])>) -> [i32; 2] {
+        let previous = self.reference.take();
+        let Some((position, next_reference)) = sample else {
+            return [0, 0];
+        };
+        self.reference = Some((capture, next_reference));
+        match previous {
+            Some((mode, reference)) if mode == capture => {
+                // In capture mode the previous warp may be followed by a window move.
+                let origin = if capture { next_reference } else { reference };
+                [position[0] - origin[0], position[1] - origin[1]]
+            }
+            _ => [0, 0],
+        }
+    }
+
     fn update_look(&mut self, delta: [i32; 2], now: Instant, elapsed: Duration, sensitivity: f32) {
         if delta != [0, 0] {
             self.last_motion = Some(now);
@@ -246,13 +265,8 @@ pub(super) fn sample() -> Option<PadState> {
         .last
         .map_or(Duration::from_millis(8), |last| now.duration_since(last));
     if elapsed >= Duration::from_millis(8) {
-        let displacement = recenter(hwnd);
-        let delta = if m.centered {
-            displacement.unwrap_or_default()
-        } else {
-            [0, 0]
-        };
-        m.centered = displacement.is_some();
+        let capture = victory_gpu::mouse_capture_enabled();
+        let delta = m.displacement(capture, cursor_sample(hwnd, capture));
         m.update_look(delta, now, elapsed, b.sensitivity);
         m.last = Some(now);
     }
@@ -279,6 +293,21 @@ pub(super) fn sample() -> Option<PadState> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn cursor_motion_resets_on_mode_switch_and_window_exit() {
+        let mut mouse = Mouse::default();
+        let free = |position| Some((position, position));
+        assert_eq!(mouse.displacement(false, free([10, 10])), [0, 0]);
+        assert_eq!(mouse.displacement(false, free([12, 7])), [2, -3]);
+        assert_eq!(mouse.displacement(false, None), [0, 0]);
+        assert_eq!(mouse.displacement(false, free([40, 40])), [0, 0]);
+
+        let centered = |position| Some((position, [100, 100]));
+        assert_eq!(mouse.displacement(true, centered([40, 40])), [0, 0]);
+        assert_eq!(mouse.displacement(true, centered([101, 98])), [1, -2]);
+        assert_eq!(mouse.displacement(false, free([100, 100])), [0, 0]);
+    }
+
     #[test]
     fn continuous_motion_and_release() {
         let mut m = Mouse::default();
